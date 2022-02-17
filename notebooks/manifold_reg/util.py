@@ -122,7 +122,7 @@ def objective_log_fn_2(X, Y, beta, L, l1, l2=None):
         obj = -(log_ll / m) + l1 * cp.norm(beta, 2) +  l2 * cp.atoms.quad_form(beta, L_psd)
     return obj
 
-def get_penalty_comp_log(X, y, beta, L=None):
+def get_penalty_comp_log(X, y, beta, L=None, use_coef=False):
     f = X @ beta
     m = X.shape[0]
     log_ll = np.sum((y * f) - np.log(1 + np.exp(f))) / m
@@ -131,8 +131,10 @@ def get_penalty_comp_log(X, y, beta, L=None):
     if L is None:
         return -log_ll, c1
     else:
-        c2 = f.T @ L @ f
-
+        if use_coef:
+            c2 = beta.T @ L @ beta
+        else:
+            c2 = f.T @ L @ f
         return -log_ll, c1, c2
 
 def log_loss_cp(X, y, beta):
@@ -140,14 +142,14 @@ def log_loss_cp(X, y, beta):
     return log_loss(y, p)
 
 
-def get_laplacian_mat(X1, X2, prec_mat, gamma):
+def get_laplacian_mat(X1, X2, prec_mat, gamma, norm=False):
 
     K = calculate_mahal_kernel(X1, X2, prec_mat, gamma=gamma)
     # W =  np.sum(K, axis=0)
     # D = np.diag(W)
     #
     # L = D - K
-    L = scipy.sparse.csgraph.laplacian(K, normed=False)
+    L = scipy.sparse.csgraph.laplacian(K, normed=norm)
     return L
 
 
@@ -157,7 +159,7 @@ def solve_prob(prob):
 
 
 
-def solve_logistic_reg(X_train, X_test, y_train, y_test, l1_vals, l2_vals, gamma, assoc_mat, err_fn=log_loss_cp):
+def solve_logistic_reg(X_train, X_test, y_train, y_test, l1_vals, l2_vals, gamma, assoc_mat, err_fn=log_loss_cp, lap_norm=False):
 
     assert l1_vals.shape[0] == l2_vals.shape[0]
 
@@ -172,7 +174,7 @@ def solve_logistic_reg(X_train, X_test, y_train, y_test, l1_vals, l2_vals, gamma
 
     prec_mat = get_emp_covariance(X_train, assoc_mat)
 
-    L = get_laplacian_mat(X_train, X_train, prec_mat, gamma)
+    L = get_laplacian_mat(X_train, X_train, prec_mat, gamma, lap_norm)
 
     prob_lst = []
 
@@ -197,12 +199,12 @@ def solve_logistic_reg(X_train, X_test, y_train, y_test, l1_vals, l2_vals, gamma
 
     return train_errors, test_errors, beta_vals, ll_pens, l1_pens, l2_pens
 
-def apply_logisitc_reg(X_train, X_test, y_train, y_test, l1, l2, gamma, assoc_mat, err_fn=log_loss_cp):
+def apply_logisitc_reg(X_train, X_test, y_train, y_test, l1, l2, gamma, assoc_mat, err_fn=log_loss_cp, lap_norm=False):
     beta = cp.Variable(X_train.shape[1])
 
     prec_mat = get_emp_covariance(X_train, assoc_mat)
 
-    L = get_laplacian_mat(X_train, X_train, prec_mat, gamma)
+    L = get_laplacian_mat(X_train, X_train, prec_mat, gamma, lap_norm)
 
     prob = cp.Problem(cp.Maximize(objective_log_fn(X_train, y_train, beta, L, l1, l2)))
     prob.solve(solver="SCS", max_iters=10000)
