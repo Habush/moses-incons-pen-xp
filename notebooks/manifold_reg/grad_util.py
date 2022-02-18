@@ -142,7 +142,7 @@ def solve_logistic_reg_grad(X_train, X_test, y_train, y_test, l1_vals, l2_vals, 
 
         for i, l1 in enumerate(l1_vals):
             for j, l2 in enumerate(l2_vals):
-                print(f"[{datetime.now()}] - Using l1 - {l1}, l2 - {l2}")
+                # print(f"[{datetime.now()}] - Using l1 - {l1}, l2 - {l2}")
                 if use_coef:
                     if l2_norm:
                         beta = scipy.optimize.fmin_l_bfgs_b(objectiv_log_loss_l2_coef, x0=beta_0, fprime=grad_log_loss_l2_coef, args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
@@ -266,7 +266,7 @@ def run_logisitic_reg_exp(X_train, X_test, y_train, y_test, assoc_mat, gammas, l
         j = 0
         print(f"[{datetime.now()}] - gamma - {g:.2f}")
         for train_idx, test_idx in cv.split(X_train, y_train):
-            print(f"[{datetime.now()}] - fold - {j + 1}")
+            # print(f"[{datetime.now()}] - fold - {j + 1}")
             x_train_cv, x_test_cv = X_train[train_idx], X_train[test_idx]
             y_train_cv, y_test_cv = y_train[train_idx], y_train[test_idx]
             if l2_vals is None:
