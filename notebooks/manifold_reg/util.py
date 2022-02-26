@@ -15,6 +15,7 @@ from sklearn.metrics import precision_score
 from sklearn.model_selection import KFold, StratifiedKFold
 import dask
 from datetime import datetime
+from sklearn.preprocessing import StandardScaler
 
 def is_positive_semidefinite(X):
     if X.shape[0] != X.shape[1]: # must be a square matrix
@@ -597,7 +598,7 @@ def get_col_names(tf, genes):
 
     return cols
 
-def get_assoc_mat(tf, genes):
+def get_assoc_mat(tf, genes, corr=1, bias=False):
     feats = tf + (tf * genes)
     assoc_mat = np.eye(feats, feats)
     m = genes + 1
@@ -605,7 +606,11 @@ def get_assoc_mat(tf, genes):
         for g in range(t + 1, t + m):
             assoc_mat[t, g] = 1
             assoc_mat[g, t] = 1
-
+    if bias:
+        zero_col = np.zeros((assoc_mat.shape[0], 1))
+        zero_row = np.zeros((1, assoc_mat.shape[0] + 1))
+        assoc_mat = np.hstack((zero_col, assoc_mat))
+        return np.vstack((zero_row, assoc_mat))
     return assoc_mat
 
 
@@ -721,3 +726,21 @@ def calculate_sens_spec(beta_hat, n=44):
     specificity = tn / (tn + fp)
     print(f"tp: {tp}, fp: {fp}, fn: {fn}, tp: {tp}")
     return sensitivity, specificity
+
+def preprocess_data(X_train, X_test):
+    # scale the X values to standard normal distribution
+    scaler = StandardScaler().fit(X_train)
+    X_train_s = scaler.transform(X_train)
+    X_test_s = scaler.transform(X_test)
+
+    #change 0s to -1 so the y is element of {-1, 1}
+    #
+    # y_train_t = y_train.copy()
+    # idx_train = np.where(y_train_t == 0)
+    # y_train_t[idx_train] = -1
+    #
+    # y_test_t = y_test.copy()
+    # idx_test = np.where(y_test_t == 0)
+    # y_test_t[idx_test] = -1
+
+    return X_train_s, X_test_s
