@@ -1,9 +1,11 @@
 __author__ = 'Abdulrahman Semrie<hsamireh@gmail.com>'
 
-import numpy as np
+# import numpy as np
+from util import *
+import autograd.numpy as np
+from autograd import grad
 import pandas as pd
 import scipy
-from util import *
 
 def p(z):
     return 1/(1 + np.exp(-z))
@@ -40,7 +42,7 @@ def objective_log_loss_l2(b, X, y, L, l1, l2):
 
 
 def grad_log_loss_l2(b, X, y, L, l1, l2):
-    h = p(X.dot(b))
+    h = sigmoid(X @ b)
     m = X.shape[0]
     grad_log = X.T @ (h - y)
     # print(f"grad: {grad_log}, m: {m}")
@@ -55,22 +57,22 @@ def objective_log_loss_l2_coef(b, X, y, L, l1, l2):
 
 
 def grad_log_loss_l2_coef(b, X, y, L, l1, l2):
-    h = p(X.dot(b))
+    h = sigmoid(X.dot(b))
     m = X.shape[0]
     grad_log = X.T @ (h - y)
     # print(f"grad: {grad_log}, m: {m}")
     return grad_log/m + l1 * grad_norm_2(b) + l2 * grad_quad_form_coef(b, L)
 
 def objective_log_loss_l1(b, X, y, L, l1, l2):
-    f = X.dot(b)
+    f = X @ b
     m = X.shape[0]
     log_ll = np.sum((y*f) - np.log(1 + np.exp(f))) / m
-    return -log_ll + l1 * np.linalg.norm(b, 1) \
+    return -log_ll + l1 * np.sum(np.abs(b)) \
                 + l2 * quad_form(b, X, L)
 
 
 def grad_log_loss_l1(b, X, y, L, l1, l2):
-    h = p(X.dot(b))
+    h = sigmoid(X @ b)
     m = X.shape[0]
     grad_log = X.T @ (h - y)
     return grad_log/m + l1 * grad_norm_1(b) + l2 * grad_quad_form(b, X, L)
@@ -79,12 +81,12 @@ def objective_log_loss_l1_coef(b, X, y, L, l1, l2):
     f = X @ b
     m = X.shape[0]
     log_ll = np.sum((y*f) - np.log(1 + np.exp(f))) / m
-    return -log_ll + l1 * np.linalg.norm(b, 1) \
+    return -log_ll + l1 * np.sum(np.abs(b)) \
                 + l2 * quad_form_coef(b, L)
 
 
 def grad_log_loss_l1_coef(b, X, y, L, l1, l2):
-    h = p(X.dot(b))
+    h = sigmoid(X @ b)
     m = X.shape[0]
     grad_log = X.T @ (h - y)
     return grad_log/m + l1 * grad_norm_1(b) + l2 * grad_quad_form_coef(b, L)
@@ -97,7 +99,7 @@ def objective_log_loss_l2_no_pen(b, X, y, l1):
 
 
 def grad_log_loss_l2_no_pen(b, X, y, l1):
-    h = p(X.dot(b))
+    h = sigmoid(X @ b)
     m = X.shape[0]
     grad_log = X.T @ (h - y)
     # print(f"grad: {grad_log}, m: {m}")
@@ -107,11 +109,11 @@ def objective_log_loss_l1_no_pen(b, X, y, l1):
     f = X @ b
     m = X.shape[0]
     log_ll = np.sum((y*f) - np.log(1 + np.exp(f))) / m
-    return -log_ll + l1 * np.linalg.norm(b, 1)
+    return -log_ll + l1 * np.sum(np.abs(b))
 
 
 def grad_log_loss_l1_no_pen(b, X, y, l1):
-    h = p(X.dot(b))
+    h = sigmoid(X @ b)
     m = X.shape[0]
     grad_log = X.T @ (h - y)
     return grad_log/m + l1 * grad_norm_1(b)
@@ -143,25 +145,25 @@ def solve_logistic_reg_grad(X_train, X_test, y_train, y_test, l1_vals, l2_vals=N
                 # print(f"[{datetime.now()}] - Using l1 - {l1}, l2 - {l2}")
                 if use_coef:
                     if l2_norm:
-                        # beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2_coef, x0=beta_0, fprime=grad_log_loss_l2_coef, args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
-                        beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2_coef, x0=beta_0,  approx_grad=True, args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
+                        beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2_coef, x0=beta_0, fprime=grad(objective_log_loss_l2_coef, 0), args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
+                        # beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2_coef, x0=beta_0,  approx_grad=True, args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
                     else:
-                        # beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1_coef, x0=beta_0, fprime=grad_log_loss_l1_coef,
-                        #                                 args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
-                        beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1_coef, x0=beta_0,
-                                                            approx_grad=True,
-                                                            args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
+                        beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1_coef, x0=beta_0, fprime=grad(objective_log_loss_l1_coef, 0),
+                                                        args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
+                        # beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1_coef, x0=beta_0,
+                        #                                     approx_grad=True,
+                        #                                     args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
 
                 else:
                     if l2_norm:
-                        # beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2, x0=beta_0, fprime=grad_log_loss_l2, args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
-                        beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2, x0=beta_0, approx_grad=True,
-                                                            args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
-                    else:
-                        # beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1, x0=beta_0, fprime=grad_log_loss_l1,
+                        beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2, x0=beta_0, fprime=grad(objective_log_loss_l2, 0), args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
+                        # beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2, x0=beta_0, approx_grad=True,
                         #                                     args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
-                        beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1, x0=beta_0, approx_grad=True,
+                    else:
+                        beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1, x0=beta_0, fprime=grad(objective_log_loss_l1, 0),
                                                             args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
+                        # beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1, x0=beta_0, approx_grad=True,
+                        #                                     args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
 
                 train_errors[i, j] = err_fn(X_train, y_train, beta)
                 test_errors[i, j] = err_fn(X_test, y_test, beta)
@@ -180,15 +182,15 @@ def solve_logistic_reg_grad(X_train, X_test, y_train, y_test, l1_vals, l2_vals=N
 
         for i, l1 in enumerate(l1_vals):
             if l2_norm:
-                # beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2_no_pen, x0=beta_0, fprime=grad_log_loss_l2_no_pen,
-                #                                     args=(X_train, y_train, l1), maxiter=1000)[0]
-                beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2_no_pen, x0=beta_0, approx_grad=True,
-                                             args=(X_train, y_train, l1), maxiter=1000)[0]
+                beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2_no_pen, x0=beta_0, fprime=grad(objective_log_loss_l2_no_pen, 0),
+                                                    args=(X_train, y_train, l1), maxiter=1000)[0]
+                # beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2_no_pen, x0=beta_0, approx_grad=True,
+                #                              args=(X_train, y_train, l1), maxiter=1000)[0]
             else:
-                # beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1_no_pen, x0=beta_0, fprime=grad_log_loss_l1_no_pen,
-                #                                     args=(X_train, y_train, l1), maxiter=1000)[0]
-                beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1_no_pen, x0=beta_0, approx_grad=True,
-                                             args=(X_train, y_train, l1), maxiter=1000)[0]
+                beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1_no_pen, x0=beta_0, fprime=grad(objective_log_loss_l1_no_pen, 0),
+                                                    args=(X_train, y_train, l1), maxiter=1000)[0]
+                # beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1_no_pen, x0=beta_0, approx_grad=True,
+                #                              args=(X_train, y_train, l1), maxiter=1000)[0]
             train_errors[i] = err_fn(X_train, y_train, beta)
             test_errors[i] = err_fn(X_test, y_test, beta)
             beta_vals[i] = beta
@@ -208,10 +210,10 @@ def apply_logisitc_reg_grad(X_train, X_test, y_train, y_test, l1, l2=None, gamma
         if use_coef:
             L = scipy.sparse.csgraph.laplacian(assoc_mat, normed=lap_norm)
             if l2_norm:
-                beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2_coef, x0=beta_0, fprime=grad_log_loss_l2_coef,
+                beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2_coef, x0=beta_0, fprime=grad(objective_log_loss_l2_coef, 0),
                                                     args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
             else:
-                beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1_coef, x0=beta_0, fprime=grad_log_loss_l1_coef,
+                beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1_coef, x0=beta_0, fprime=grad(objective_log_loss_l1_coef, 0),
                                                     args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
         else:
             prec_mat = get_emp_covariance(X_train, assoc_mat)
@@ -219,14 +221,14 @@ def apply_logisitc_reg_grad(X_train, X_test, y_train, y_test, l1, l2=None, gamma
             L = get_laplacian_mat(X_train, X_train, prec_mat, gamma, lap_norm)
 
             if l2_norm:
-                # beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2, x0=beta_0, fprime=grad_log_loss_l2, args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
-                beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2, x0=beta_0, approx_grad=True,
-                                                    args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
-            else:
-                # beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1, x0=beta_0, fprime=grad_log_loss_l1,
+                beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2, x0=beta_0, fprime=grad(objective_log_loss_l2, 0), args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
+                # beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2, x0=beta_0, approx_grad=True,
                 #                                     args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
-                beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1, x0=beta_0, approx_grad=True,
+            else:
+                beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1, x0=beta_0, fprime=grad(objective_log_loss_l1, 0),
                                                     args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
+                # beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1, x0=beta_0, approx_grad=True,
+                #                                     args=(X_train, y_train, L, l1, l2), maxiter=1000)[0]
         train_error = err_fn(X_train, y_train, beta)
         test_error = err_fn(X_test, y_test, beta)
         beta_vals = np.ndarray.flatten(beta)
@@ -237,15 +239,15 @@ def apply_logisitc_reg_grad(X_train, X_test, y_train, y_test, l1, l2=None, gamma
 
     else:
         if l2_norm:
-            # beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2_no_pen, x0=beta_0, fprime=grad_log_loss_l2_no_pen,
-            #                                     args=(X_train, y_train, l1), maxiter=1000)[0]
-            beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2_no_pen, x0=beta_0, approx_grad=True,
+            beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2_no_pen, x0=beta_0, fprime=grad(objective_log_loss_l2_no_pen, 0),
                                                 args=(X_train, y_train, l1), maxiter=1000)[0]
+            # beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l2_no_pen, x0=beta_0, approx_grad=True,
+            #                                     args=(X_train, y_train, l1), maxiter=1000)[0]
         else:
-            # beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1_no_pen, x0=beta_0, fprime=grad_log_loss_l1_no_pen,
-            #                                     args=(X_train, y_train, l1), maxiter=1000)[0]
-            beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1_no_pen, x0=beta_0, approx_grad=True,
+            beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1_no_pen, x0=beta_0, fprime=grad(objective_log_loss_l1_no_pen, 0),
                                                 args=(X_train, y_train, l1), maxiter=1000)[0]
+            # beta = scipy.optimize.fmin_l_bfgs_b(objective_log_loss_l1_no_pen, x0=beta_0, approx_grad=True,
+            #                                     args=(X_train, y_train, l1), maxiter=1000)[0]
         train_error = err_fn(X_train, y_train, beta)
         test_error = err_fn(X_test, y_test, beta)
         beta_vals = np.ndarray.flatten(beta)

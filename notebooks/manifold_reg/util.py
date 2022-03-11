@@ -5,7 +5,7 @@ import os.path
 
 import cvxpy as cp
 import matplotlib.pyplot as plt
-import numpy as np
+import autograd.numpy as np
 import pandas as pd
 import scipy
 from matplotlib.pyplot import figure
@@ -711,7 +711,7 @@ def plot_lambda_vals(gammas, train_errs, test_errs, train_penalty, test_penalty,
 
 
 def calculate_sens_spec(beta_hat, n=44):
-    idx = np.where((beta_hat > 1e-8) | (beta_hat < -1e-8))
+    idx = np.where((beta_hat > 1e-5) | (beta_hat < -1e-5))
 
     beta_true = np.zeros(len(beta_hat))
     beta_true[np.arange(0, n)] = 1
