@@ -5,6 +5,7 @@ import scipy
 import numpy as np
 from scipy import sparse
 from scipy.special import expit
+from libc.stdio cimport printf
 
 from libc.math cimport exp
 from libc.math cimport log
@@ -17,7 +18,7 @@ DTYPE = np.double
 
 class LogisticRegressionBounded:
 
-    def __init__(self, C=1.0, D=1.0, fit_intercept=False, lower=None, upper=None, do_elimination=True):
+    def __init__(self, C=0.0, D=0.0, fit_intercept=False, lower=None, upper=None, do_elimination=True):
         self._C = C
         self._D = D
         if lower is None:
@@ -46,7 +47,8 @@ class LogisticRegressionBounded:
     def decision_function(self, X):
         return X.dot(self.coef_[0]) + self.intercept_
 
-    def fit(self, X, y, A, sample_weight=None, beta=0.9, sigma=0.01, tol=1e-5, min_epochs=2, max_epochs=200, init_w=None, verbose=0, randomize=False):
+    def fit(self, X, y, A, sample_weight=None, beta=0.9, sigma=0.01, tol=1e-5, min_epochs=2, max_epochs=200,
+            init_w=None, verbose=0, randomize=False, max_ls_steps=2000):
         """
         Coordinate descent with Newton directions for L1-regularized logistic regression
         :param X: n x p feature matrix
@@ -58,7 +60,7 @@ class LogisticRegressionBounded:
 
         n_items, n_features = X.shape
         assert sparse.issparse(X)
-
+        self._A = A
         # add an intercept term if desired
         if self._fit_intercept:
             X = sparse.hstack([np.ones((n_items, 1)), X])
@@ -107,17 +109,19 @@ class LogisticRegressionBounded:
         self._exp_nyXw = np.exp(-yX.dot(self._w))
         self._probs = 1.0 / (1.0 + self._exp_nyXw)
         self._Q = self._D * quad_form(self._w, self._A)
+        print("Initial Background pen %0.5f - reloaded v%d" % (self._Q, 2))
         self._R = self._C * np.sum(np.abs(self._w))
         self._L = np.sum(sample_weights * np.log(1.0 + self._exp_nyXw))
 
-
         order = np.array(np.arange(n_features), dtype=np.int32)
+
+        print("C=%0.5f, D=%0.5f" % (self._C, self._D))
 
         for k in range(max_epochs):
             if randomize:
                 np.random.shuffle(order)
 
-            delta, ls_steps, L, Q, R = sparse_update(n_items, n_features, self._fit_intercept, self._C, self._C, beta, sigma, self._L, self._Q, self._R, self._probs, self._exp_nyXw, self._w, self._lower, self._upper, yX_j_starts, yX_j_lengths, yX_rows, yX_vals, sample_weights, order, self._M, self._v, self._active, self._A)
+            delta, ls_steps, L, Q, R = sparse_update(n_items, n_features, self._fit_intercept, self._C, self._D, beta, sigma, self._L, self._Q, self._R, self._probs, self._exp_nyXw, self._w, self._lower, self._upper, yX_j_starts, yX_j_lengths, yX_rows, yX_vals, sample_weights, order, self._M, self._v, self._active, max_ls_steps, self._A)
             self._L = L
             self._Q = Q
             self._R = R
@@ -132,7 +136,8 @@ class LogisticRegressionBounded:
             else:
                 rel_change = 0.0
             if verbose > 1:
-                print("epoch %d, delta=%0.5f, rel_change=%0.5f, ls_steps=%d" % (k, delta, rel_change, ls_steps))
+                print("epoch %d, delta=%0.5f, rel_change=%0.5f, ls_steps=%d, avg. log_loss=%0.5f, "
+                      "bp_pen=%0.5f, lasso_pen=%0.5f" % (k, delta, rel_change, ls_steps, (L/n_items), Q, R))
             if rel_change < tol and k >= min_epochs - 1:
                 if verbose > 0:
                     print("relative change below tolerance; stopping after %d epochs" % k)
@@ -164,7 +169,7 @@ class LogisticRegressionBounded:
         return probs
 
 
-cdef sparse_update(int n_items, int n_features, int fit_intercept, double C, double D, double beta, double sigma, double L, double Q, double R, double[:] probs, double[:] exp_nyXw, np.ndarray[np.float_t, ndim=1] w, double lower, double upper, int[:] yX_j_starts, int[:] yX_j_lengths, int[:] yX_rows, double[:] yX_vals, double[:] sample_weights, int[:] order, double M, double[:] v, int[:] active, double[:,:] A):
+cdef sparse_update(int n_items, int n_features, int fit_intercept, double C, double D, double beta, double sigma, double L, double Q, double R, double[:] probs, double[:] exp_nyXw, np.ndarray[np.float_t, ndim=1] w, double lower, double upper, int[:] yX_j_starts, int[:] yX_j_lengths, int[:] yX_rows, double[:] yX_vals, double[:] sample_weights, int[:] order, double M, double[:] v, int[:] active, int max_ls, double[:,:] A):
 
         cdef int i = 0
         cdef int j
@@ -188,7 +193,7 @@ cdef sparse_update(int n_items, int n_features, int fit_intercept, double C, dou
                     is_bias = 1
                 else:
                     is_bias = 0
-                ls_steps, change, L, R, Q, v_j, is_active = sparse_update_one_coordinate(C, D, beta, sigma, L, Q, R, probs, exp_nyXw, exp_nyXw_new, w, lower, upper, yX_j_starts[j], yX_j_lengths[j], yX_rows, yX_vals, sample_weights, M, is_bias, j, A)
+                ls_steps, change, L, R, Q, v_j, is_active = sparse_update_one_coordinate(C, D, beta, sigma, L, Q, R, probs, exp_nyXw, exp_nyXw_new, w, lower, upper, yX_j_starts[j], yX_j_lengths[j], yX_rows, yX_vals, sample_weights, M, is_bias, max_ls, j, A)
                 if c_abs(change) > 0:
                     w[j] += change
                 v[j] = v_j
@@ -202,7 +207,7 @@ cdef sparse_update(int n_items, int n_features, int fit_intercept, double C, dou
 
 
 
-cdef sparse_update_one_coordinate(double C, double D, double beta, double sigma, double L, double Q, double R, double[:] probs, double[:] exp_nyXw, double[:] exp_nyXw_new, np.ndarray[np.float_t, ndim=1] w, double lower, double upper, int yX_j_start, int yX_j_length, int[:] yX_rows, double[:] yX_vals, double[:] sample_weights, double M, int is_bias, int j, double[:,:] A):
+cdef sparse_update_one_coordinate(double C, double D, double beta, double sigma, double L, double Q, double R, double[:] probs, double[:] exp_nyXw, double[:] exp_nyXw_new, np.ndarray[np.float_t, ndim=1] w, double lower, double upper, int yX_j_start, int yX_j_length, int[:] yX_rows, double[:] yX_vals, double[:] sample_weights, double M, int is_bias, int max_ls, int j, double[:,:] A):
 
     cdef int index
     cdef int i
@@ -210,6 +215,7 @@ cdef sparse_update_one_coordinate(double C, double D, double beta, double sigma,
     cdef double thresh
 
     cdef double w_j = w[j]
+    cdef double prev_w_j = w[j]
     cdef double d  # base Newton step
     cdef double a = 1.0  # my name for lambda
     cdef double line_steps = 0
@@ -230,7 +236,7 @@ cdef sparse_update_one_coordinate(double C, double D, double beta, double sigma,
             active = 0
             v_j = 0
             a = 0.0
-            print("Eliminating a variable")
+            # print("Eliminating a variable")
             return line_steps, a, L, R, v_j, active
 
     # compute a new value for updating self._M
@@ -266,8 +272,9 @@ cdef sparse_update_one_coordinate(double C, double D, double beta, double sigma,
     if a > 0 and c_abs(d) > 0:
         # set up the threshold for convergence
         thresh = sigma * (g * d + C * c_abs(w_j + d) - C * c_abs(w_j))
-
-        base_Q = base_Q - D * quad_form(w, A)
+        w[j] = w_j
+        base_Q = base_Q - (D * quad_form(w, A))
+        w[j] = prev_w_j
         # remove the current weight from the stored 1-norm of weights
         base_R = base_R - C * c_abs(w_j)
 
@@ -280,13 +287,15 @@ cdef sparse_update_one_coordinate(double C, double D, double beta, double sigma,
 
         # do line search
         #f_new, a, i, exp_nyXw = self._line_search(yX_j, d, self._w[j], R_minus_w_j, a, thresh)
-        line_steps = sparse_line_search(C, D, g, h, f_val, exp_nyXw, exp_nyXw_new, yX_j_start, yX_j_length, yX_rows, yX_vals, sample_weights, d, w, base_L, base_Q, base_R, a, beta, thresh, j, A)
+        line_steps = sparse_line_search(C, D, g, h, f_val, exp_nyXw, exp_nyXw_new, yX_j_start, yX_j_length, yX_rows, yX_vals, sample_weights, d, w, base_L, base_Q, base_R, a, beta, thresh, max_ls, j, A)
         a = a * (beta ** line_steps)
 
         w_j += a * d
 
-        # update the objective pieces        
-        base_Q = base_Q + D * quad_form(w, A)
+        # update the objective pieces
+        w[j] = w_j
+        base_Q = base_Q + (D * quad_form(w, A))
+        w[j] = prev_w_j
 
         # base_R = base_R + C * c_abs(w_j + a * d) I think this is a bug
         base_R = base_R + C * c_abs(w_j)
@@ -311,7 +320,7 @@ cdef double compute_grad_j(double D, double[:] probs, int yX_j_start, int yX_j_l
         g1 += sample_weights[index] * yX_vals[i] * (probs[index] - 1.0)
         i += 1
 
-    g2 = quad_grad_j(2, w, A)
+    g2 = D * quad_grad_j(j, w, A)
     return g1 + g2
 
 cdef double compute_hessian_element(double D, double[:] probs, int yX_j_start, int yX_j_length, int[:] yX_rows, double[:] yX_vals, double[:] sample_weights, int j, double[:, :] A):
@@ -322,10 +331,11 @@ cdef double compute_hessian_element(double D, double[:] probs, int yX_j_start, i
         index = yX_rows[i]
         h1 += sample_weights[index] * probs[index] * (1.0 - probs[index]) * yX_vals[i] * yX_vals[i]
         i += 1
+
     cdef double h2 = 2 * D * A[j, j]
     return h1 + h2
 
-cdef double sparse_line_search(double C, double D, double g, double h, double f_val, double[:] exp_nyXw_orig, double[:] exp_nyXw, int yX_j_start, int yX_j_length, int[:] yX_rows, double[:] yX_vals, double[:] sample_weights, double d, np.ndarray[np.float_t, ndim=1] prev_w, double base_L, double base_Q, double base_R, double a, double beta, double thresh, j, double[:,:] A):
+cdef double sparse_line_search(double C, double D, double g, double h, double f_val, double[:] exp_nyXw_orig, double[:] exp_nyXw, int yX_j_start, int yX_j_length, int[:] yX_rows, double[:] yX_vals, double[:] sample_weights, double d, np.ndarray[np.float_t, ndim=1] prev_w, double base_L, double base_Q, double base_R, double a, double beta, double thresh, int max_ls, j, double[:,:] A):
     cdef line_steps = 0
     cdef double orig_a = a
     cdef double step = a * d
@@ -343,13 +353,14 @@ cdef double sparse_line_search(double C, double D, double g, double h, double f_
         exp_nyXw[index] = exp_nyXw_orig[index] * exp(-step * yX_vals[i])
         L = L +  sample_weights[index] * log(1.0 + exp_nyXw[index])
         i += 1
-
-    Q = base_Q + D * quad_form(prev_w, A)
+    prev_w[j] = w_j
+    Q = base_Q + (D * quad_form(prev_w, A))
+    prev_w[j] = prev_w_j
     R = base_R + C * abs(w_j)
     cdef double f_new = L + R
     cdef int count = 0
     # check for convergence (and also set an upper limit)
-    while f_new - f_val > a * thresh and count < 2000:
+    while f_new - f_val > a * thresh and count < max_ls:
         line_steps += 1        
         a = a * beta
         step = a * d
@@ -363,8 +374,10 @@ cdef double sparse_line_search(double C, double D, double g, double h, double f_
             L = L +  sample_weights[index] * log(1.0 + exp_nyXw[index])
             i += 1
 
-        Q = base_Q + D * quad_form(prev_w, A)
-        R = base_R + abs(w_j)
+        prev_w[j] = w_j
+        Q = base_Q + (D * quad_form(prev_w, A))
+        prev_w[j] = prev_w_j
+        R = base_R + C * abs(w_j)
         f_new = L + Q + R
         count += 1
 
