@@ -24,7 +24,10 @@ def quad_form(b, X, A):
 
 def grad_quad_form(b, X, A):
     f = sigmoid(X @ b)
-    return 2 * (f @ f) * (A @ (1 - f) @ X)
+    u = f * (1 - f)
+    D = np.diag(u)
+    p = 2 * (A @ f)
+    return p.T @ D @ X
 
 ## use the quadratic form of the laplacian with the coefficients
 def quad_form_coef(b, A):
@@ -390,3 +393,22 @@ def build_table_from_log(gammas, train_errs_cv, test_errs, train_ll_pen, test_ll
 
         res_df = pd.DataFrame(res)
         return res_df
+
+def build_table_from_log_2(gammas, train_errs_cv, test_errs, c_vals, d_vals):
+    res = {"gamma": [], "min_train_err_cv": [], "l1_train_cv": [], "l2_train_cv": [],
+           "test_err": []
+             }
+
+    for i, g in enumerate(gammas):
+        res["gamma"].append(g)
+        min_idx = np.unravel_index(np.argmin(train_errs_cv[i]), train_errs_cv[i].shape)
+        # print(min_idx)
+        res["min_train_err_cv"].append(train_errs_cv[i][min_idx])
+        res["l1_train_cv"].append(c_vals[min_idx[0]])
+        res["l2_train_cv"].append(d_vals[min_idx[1]])
+
+        res["test_err"].append(test_errs[i][min_idx])
+        print(test_errs[i][min_idx])
+
+    res_df = pd.DataFrame(res)
+    return res_df

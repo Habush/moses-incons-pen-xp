@@ -5,17 +5,25 @@ import os.path
 
 import cvxpy as cp
 import matplotlib.pyplot as plt
-import autograd.numpy as np
+import numpy as np
+# import autograd.numpy as np
 import pandas as pd
 import scipy
+from sklearn.covariance import ShrunkCovariance
 from matplotlib.pyplot import figure
 from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.metrics import mean_squared_error, log_loss, confusion_matrix
-from sklearn.metrics import precision_score
-from sklearn.model_selection import KFold, StratifiedKFold
-import dask
+from sklearn.linear_model._base import LinearClassifierMixin
+from sklearn.metrics import mean_squared_error, log_loss, confusion_matrix, roc_auc_score
+from sklearn.metrics import precision_score, pairwise_distances
+from sklearn.model_selection import KFold, StratifiedKFold, GridSearchCV, cross_val_score
+from sklearn.base import BaseEstimator
 from datetime import datetime
 from sklearn.preprocessing import StandardScaler
+import lrb_init as lrb
+from log_util import log_msg
+import traceback
+
+
 
 def is_positive_semidefinite(X):
     if X.shape[0] != X.shape[1]: # must be a square matrix
@@ -279,44 +287,99 @@ def generate_log_data(tf, genes, tf_on=4, corr=0.7, val_tf=None, val_gene=math.s
 
    return X, beta, y_log
 
-def get_psd_mat(X):
-    # for i in range(X.shape[0]):
-    #     for j in range(X.shape[1]):
-    #         if i != j:
-    #             try:
-    #                 X[i, j] = 0.5 * min(X[i, j], math.sqrt(X[i, i] * X[j, j]))
-    #             except ValueError:
-    #                 print(i, j)
-    #                 raise ValueError("Math error")
 
-    regularized_X = X + np.eye(X.shape[0]) * 1e-14
+def _getAplus(A):
+    eigval, eigvec = np.linalg.eig(A)
+    Q = np.matrix(eigvec)
+    xdiag = np.matrix(np.diag(np.maximum(eigval, 0)))
+    return Q*xdiag*Q.T
+
+def _getPs(A, W=None):
+    W05 = np.matrix(W**.5)
+    return  W05.I * _getAplus(W05 * A * W05) * W05.I
+
+def _getPu(A, W=None):
+    Aret = np.array(A.copy())
+    Aret[W > 0] = np.array(W)[W > 0]
+    return np.matrix(Aret)
+
+def nearPD(A, nit=100):
+    n = A.shape[0]
+    W = np.identity(n)
+# W is the matrix used for the norm (assumed to be Identity matrix here)
+# the algorithm should work for any diagonal W
+    deltaS = 0
+    Yk = A.copy()
+    for k in range(nit):
+        Rk = Yk - deltaS
+        Xk = _getPs(Rk, W=W)
+        deltaS = Xk - Rk
+        Yk = _getPu(Xk, W=W)
+    return Yk
+
+def get_psd_mat(X, tol=1e-14):
+    if is_pd(X):
+        return X
+    else:
+        regularized_X = None
+        i = 14
+        while i > 9:
+            tol = pow(10, -i)
+            regularized_X = X + np.identity(X.shape[0]) * tol
+            if is_pd(regularized_X):
+                break
+            i += -1
+
+    # print(f"Num iter: {14 - i}")
     return regularized_X
+
+def get_psd_mat_2(X):
+    assert X.shape[0] == X.shape[1]
+    p = X.shape[0]
+    l, u = np.linalg.eigh(X)
+    # perturb the matrix by the smallest eigenvalue
+    if l[0] > 0.0: # the matrix is already PD, no need to perturb it further
+        return X
+    X = X + -l[0] * np.identity(p)
+    return X
 
 # @numba.jit(parallel=True, nopython=True)
 def get_mahala_dist(X, Y, cov_inv):
     D = np.zeros((X.shape[0], Y.shape[0]))
     for n in range(X.shape[0]):
         for m in range(Y.shape[0]):
-            diff = X[n] - X[m]
+            diff = X[n] - Y[m]
             D[n, m] = math.sqrt(diff @ cov_inv @ diff.T)
     return D
 
-def get_emp_covariance(X, M):
+def get_emp_covariance(X, M=None, pinv=True):
     cov = np.cov(X, rowvar=False)
     ##sparsify the precision matrix
     # print(f"Cov rank: {np.linalg.matrix_rank(cov)}")
     # sprec = np.multiply(M, np.linalg.inv(cov))  #this one gives math erros
-
-    sprec = np.multiply(M, scipy.linalg.pinv(cov, rtol=1e-5))
+    mat = None
+    if M is None:
+        mat = cov
+    else:
+        mat = np.multiply(M, cov)
+    if pinv:
+        sprec = scipy.linalg.pinv(mat, rtol=1e-5)
+    else:
+        try:
+            sprec = np.linalg.inv(mat)
+        except np.linalg.LinAlgError:
+            print("Cov matrix is not PSD")
+            mat = get_psd_mat(mat)
+            sprec = np.linalg.inv(mat)
 
     sprec_psd = get_psd_mat(sprec)
 
     return sprec_psd
 
 def calculate_mahal_kernel(X, Y, cov_inv, gamma=1.0):
-    D = get_mahala_dist(X, Y, cov_inv)
+    D = pairwise_distances(X, Y, metric="mahalanobis", VI=cov_inv)
 
-    K = np.exp((-1.0/(2.0*(math.pow(gamma, 2)))) * np.square(D))
+    K = np.exp(-((1.0/(2.0*(np.power(gamma, 2)))) * np.power(D, 2)))
 
     return K
 
@@ -465,114 +528,197 @@ def compare_kernels(gammas, X_train, X_test, y_train, y_test, assoc_mat, cv_fold
 
     return res
 
+def is_pd(X):
+    try:
+        np.linalg.cholesky(X)
+        return True
+    except np.linalg.LinAlgError:
+        return False
 
-def compare_kernels_log(gammas, X_train, X_test, y_train, y_test, assoc_mat, cv_fold=5, random_state=42):
+def shrunk_cov_score(X):
+    shrinkages = np.logspace(-2, 0, 30)
+    cv = GridSearchCV(ShrunkCovariance(), {"shrinkage": shrinkages}, n_jobs=-1).fit(X)
+    return cv.best_estimator_, np.mean(cross_val_score(cv.best_estimator_, X))
 
-    train_errs_mahal_log = np.zeros(gammas.shape[0])
-    train_errs_mahal_log_c = np.zeros(gammas.shape[0])
-    train_errs_log_c = np.zeros(gammas.shape[0])
-    train_errs_log = np.zeros(gammas.shape[0])
+def get_prec_mat(X, M, n_component):
+    cov = np.cov(X, rowvar=False)
+    if n_component is None:
+        if M is None:
+            return get_psd_mat(scipy.linalg.pinvh(cov))
+        return get_psd_mat(M * scipy.linalg.pinvh(cov))
+    l, u = np.linalg.eigh(cov)
+    l = np.flip(l)
+    u = np.flip(u, axis=1)
+    l_p = l[:n_component]
+    # print(l_p)
+    l_p_inv = np.diag(1.0/(l_p))
+    u_p = u[:n_component]
+    prec_mat = u_p.T @ l_p_inv @ u_p
+    if M is not None:
+        prec_mat = np.multiply(M, prec_mat)
+    prec_mat = get_psd_mat(prec_mat)
+    return prec_mat
 
-    test_errs_mahal_log = np.zeros(gammas.shape[0])
-    test_errs_mahal_log_c = np.zeros(gammas.shape[0])
-    test_errs_log_c = np.zeros(gammas.shape[0])
-    test_errs_log = np.zeros(gammas.shape[0])
+def get_prec_mat_2(cov_est, M=None, n_component=None):
+    if n_component is None:
+        if M is None:
+            return cov_est.precision_
+        return M * cov_est.precision_
 
-    k_cv = KFold(n_splits=cv_fold, random_state=random_state, shuffle=True)
+    l, u = np.linalg.eigh(cov_est.covariance_)
+    l = np.flip(l)
+    u = np.flip(u, axis=1)
+    l_p = l[:n_component]
+    # print(l_p)
+    l_p_inv = np.diag(1.0/(l_p))
+    u_p = u[:n_component]
+    prec_mat = u_p.T @ l_p_inv @ u_p
+    if M is not None:
+        prec_mat = np.multiply(M, prec_mat)
+    # prec_mat = get_psd_mat(prec_mat)
+    return prec_mat
 
-    X_train_bin = binarize_with_median(X_train)
-    X_test_bin = binarize_with_median(X_test)
+def compare_kernels_log(gammas, X_train, X_test, y_train, y_test, assoc_mat=None, cv_fold=5, random_state=42, n_component=None, verbose=2):
+    try:
+        train_errs_mahal_auc = np.zeros(gammas.shape[0])
+        train_errs_mahal_ll = np.zeros(gammas.shape[0])
 
-    for i, g in enumerate(gammas):
-        val_scores = np.zeros((4, cv_fold))
-        j = 0
-        for train_idx, test_idx in k_cv.split(X_train):
-            x_train_cv, x_train_bin_cv = X_train[train_idx], X_train_bin[train_idx]
-            x_test_cv, x_test_bin_cv = X_train[test_idx], X_train_bin[test_idx]
-            y_train_cv, y_test_cv = y_train[train_idx], y_train[test_idx]
+        test_errs_mahal_auc = np.zeros(gammas.shape[0])
+        test_errs_mahal_ll = np.zeros(gammas.shape[0])
 
-            cov_mat_reg_cv = get_emp_covariance(x_train_cv, assoc_mat)
-            cov_mat_bin_cv = get_emp_covariance(x_train_bin_cv, assoc_mat)
+        train_errs_idt_auc = np.zeros(gammas.shape[0])
+        train_errs_idt_ll = np.zeros(gammas.shape[0])
 
-            K_train_mahal_lin_cv = calculate_mahal_kernel(x_train_cv, x_train_cv, cov_mat_reg_cv, gamma=g)
-            K_test_mahal_lin_cv = calculate_mahal_kernel(x_test_cv, x_train_cv, cov_mat_reg_cv, gamma=g)
+        test_errs_idt_auc = np.zeros(gammas.shape[0])
+        test_errs_idt_ll = np.zeros(gammas.shape[0])
 
-            K_train_mahal_log_cv = calculate_mahal_kernel(x_train_bin_cv, x_train_bin_cv, cov_mat_bin_cv, gamma=g)
-            K_test_mahal_log_cv = calculate_mahal_kernel(x_test_bin_cv, x_train_bin_cv, cov_mat_bin_cv, gamma=g)
+        k_cv = KFold(n_splits=cv_fold, random_state=random_state, shuffle=True)
+        # cov_est, sc = shrunk_cov_score(X_train)
+        prec_mat = get_prec_mat(X_train, assoc_mat, n_component)
+        # prec_mat = nearPD(prec_mat, 5)
+        # print(f"prec_mat is PD: {is_pd(prec_mat)}, cov score: {sc}, shrinkage: {cov_est.shrinkage}")
+        print(f"prec_mat is PD: {is_pd(prec_mat)}")
+        for i, g in enumerate(gammas):
 
-            clf_mahal_log = LogisticRegression()
-            clf_mahal_log_c = LogisticRegression()
-            clf_log_c = LogisticRegression()
-            clf_log = LogisticRegression()
+            # print(f"gamma - {g:.2f}")
 
-            clf_mahal_log.fit(K_train_mahal_log_cv, y_train_cv)
-            clf_mahal_log_c.fit(K_train_mahal_lin_cv, y_train_cv)
-            clf_log_c.fit(x_train_cv, y_train_cv)
-            clf_log.fit(x_train_bin_cv, y_train_cv)
+            auc_mahal_val_scores = np.zeros(cv_fold)
+            auc_idt_val_scores = np.zeros(cv_fold)
+            ll_mahal_val_scores = np.zeros(cv_fold)
+            ll_idt_val_scores = np.zeros(cv_fold)
+            j = 0
+            for train_idx, test_idx in k_cv.split(X_train):
+                x_train_cv, x_test_cv = X_train[train_idx], X_train[test_idx]
+                y_train_cv, y_test_cv = y_train[train_idx], y_train[test_idx]
 
-            val_scores[0][j] = log_loss(y_test_cv, clf_mahal_log.predict_proba(K_test_mahal_log_cv))
-            val_scores[1][j] = log_loss(y_test_cv, clf_mahal_log_c.predict_proba(K_test_mahal_lin_cv))
-            val_scores[2][j] = log_loss(y_test_cv, clf_log_c.predict_proba(x_test_cv))
-            val_scores[3][j] = log_loss(y_test_cv, clf_log.predict_proba(x_test_bin_cv))
+                # weights = np.zeros(len(y_train_cv))s
+                # unq = np.unique(y_train_cv, return_counts=True)
+                # num_0, num_1 = unq[1][0], unq[1][1]
+                # cl_0_idx = np.where(y_train_cv == 0)
+                # cl_1_idx = np.where(y_train_cv == 1)
+                # if num_0 > 2 * num_1:
+                #     weights[cl_0_idx] = 1.0
+                #     weights[cl_1_idx] = 2.0
+                # elif num_1 > 2 * num_0:
+                #     weights[cl_0_idx] = 2.0
+                #     weights[cl_1_idx] = 1.0
 
-            j += 1
+                # cov_est_cv, sc_cv = shrunk_cov_score(x_train_cv)
+                prec_mat_cv = get_prec_mat(x_train_cv, assoc_mat, n_component)
+                # prec_mat_cv = nearPD(prec_mat_cv, 5)
+                # print(f"prec_mat is PD: {is_pd(prec_mat_cv)}, cov score: {sc_cv}, shrinkage: {cov_est_cv.shrinkage}")
+                print(f"prec_mat is PD: {is_pd(prec_mat_cv)}")
 
-        # print(f"--- gamma val: {g} ---\nlin_mahala: {-np.mean(cv_scores_m_lin)}\nlog_mahala: {-np.mean(cv_scores_m_log)}"
-        #       f"\nlin_idt:{-np.mean(cv_scores_i_lin)}\nlog_idt: {-np.mean(cv_scores_i_log)}\n")
+                K_train_mahal_cv = calculate_mahal_kernel(x_train_cv, x_train_cv, prec_mat_cv, gamma=g)
+                K_test_mahal_cv = calculate_mahal_kernel(x_test_cv, x_train_cv, prec_mat_cv, gamma=g)
 
-        clf_mahal_log = LogisticRegression()
-        clf_mahal_log_c = LogisticRegression()
-        clf_log_c = LogisticRegression()
-        clf_log = LogisticRegression()
+                K_train_idt_cv = calculate_mahal_kernel(x_train_cv, x_train_cv, np.identity(x_train_cv.shape[1]), gamma=g)
+                K_test_idt_cv = calculate_mahal_kernel(x_test_cv, x_train_cv, np.identity(x_train_cv.shape[1]), gamma=g)
 
-        train_errs_mahal_log[i] = np.mean(val_scores[0])
-        train_errs_mahal_log_c[i] = np.mean(val_scores[1])
-        train_errs_log_c[i] = np.mean(val_scores[2])
-        train_errs_log[i] = np.mean(val_scores[3])
+                # clf_mahal = lrb.LogisticRegressionBounded(C=0.0, fit_intercept=True)
+                # clf_idt = lrb.LogisticRegressionBounded(C=0.0, fit_intercept=True)
+                #
+                # clf_mahal.fit(scipy.sparse.coo_matrix(K_train_mahal_cv), y_train_cv, sample_weight=weights)
+                # clf_idt.fit(scipy.sparse.coo_matrix(K_train_idt_cv), y_train_cv, sample_weight=weights)
 
-        cov_mat_reg = get_emp_covariance(X_train, assoc_mat)
-        cov_mat_bin = get_emp_covariance(X_train_bin, assoc_mat)
+                clf_mahal = LogisticRegression(penalty='none', C=1e9, fit_intercept=True, class_weight="auto")
+                clf_idt = LogisticRegression(penalty='none', C=1e9, fit_intercept=True, class_weight="auto")
 
-        K_train_mahal_lin = calculate_mahal_kernel(X_train, X_train, cov_mat_reg, gamma=g)
-        K_test_mahal_lin = calculate_mahal_kernel(X_test, X_train, cov_mat_reg, gamma=g)
+                clf_mahal.fit(K_train_mahal_cv, y_train_cv)
+                clf_idt.fit(K_train_idt_cv, y_train_cv)
 
-        K_train_mahal_log = calculate_mahal_kernel(X_train_bin, X_train_bin, cov_mat_bin, gamma=g)
-        K_test_mahal_log = calculate_mahal_kernel(X_test_bin, X_train_bin, cov_mat_bin, gamma=g)
+                # prob_mahal = sigmoid(K_test_mahal_cv @ clf_mahal.coef_[0])
+                # prob_idt = sigmoid(K_test_idt_cv @ clf_idt.coef_[0])
+                prob_mahal = clf_mahal.predict_proba(K_test_mahal_cv)[:,1]
+                prob_idt = clf_idt.predict_proba(K_test_idt_cv)[:,1]
 
+                auc_mahal_val_scores[j] = roc_auc_score(y_test_cv, prob_mahal)
+                auc_idt_val_scores[j] = roc_auc_score(y_test_cv, prob_idt)
 
-        clf_mahal_log.fit(K_train_mahal_log, y_train)
-        clf_mahal_log_c.fit(K_train_mahal_lin, y_train)
-        clf_log_c.fit(X_train, y_train)
-        clf_log.fit(X_train_bin, y_train)
+                ll_mahal_val_scores[j] = log_loss(y_test_cv, prob_mahal)
+                ll_idt_val_scores[j] = log_loss(y_test_cv, prob_idt)
 
-        test_errs_mahal_log[i] = log_loss(y_test, clf_mahal_log.predict_proba(K_test_mahal_log))
-        test_errs_mahal_log_c[i] = log_loss(y_test, clf_mahal_log_c.predict_proba(K_test_mahal_lin))
-        test_errs_log_c[i] = log_loss(y_test, clf_log_c.predict_proba(X_test))
-        test_errs_log[i] = log_loss(y_test, clf_log.predict_proba(X_test_bin))
-    print("Done")
+                j += 1
 
-    res = {"train_mahal_log": train_errs_mahal_log,"test_mahal_log": test_errs_mahal_log, "train_mahal_log_c": train_errs_mahal_log_c, "test_mahal_log_c": test_errs_mahal_log_c,
-           "train_log_c": train_errs_log_c, "test_log_c": test_errs_log_c,
-           "train_log": train_errs_log, "test_log": test_errs_log}
+            # print(f"--- gamma val: {g} ---\nlin_mahala: {-np.mean(cv_scores_m_lin)}\nlog_mahala: {-np.mean(cv_scores_m_log)}"
+            #       f"\nlin_idt:{-np.mean(cv_scores_i_lin)}\nlog_idt: {-np.mean(cv_scores_i_log)}\n")
 
-    min_val_mahal_log_idx = np.argmin(res['train_mahal_log'])
-    min_test_mahal_log_idx = np.argmin(res['test_mahal_log'])
-    min_val_mahal_log_c_idx = np.argmin(res['train_mahal_log_c'])
-    min_test_mahal_log_c_idx = np.argmin(res['test_mahal_log_c'])
-    min_val_log_c_idx = np.argmin(res["train_log_c"])
-    min_test_log_c_idx = np.argmin(res["test_log_c"])
-    min_val_log_idx = np.argmin(res["train_log"])
-    min_test_log_idx = np.argmin(res["test_log"])
+            # clf_mahal = lrb.LogisticRegressionBounded(C=0.0, fit_intercept=True)
+            # clf_idt = lrb.LogisticRegressionBounded(C=0.0, fit_intercept=True)
 
-    print( f"Mahal Contin Logistic Regression: Validation - gamma: {gammas[min_val_mahal_log_c_idx]}, score: {res['train_mahal_log_c'][min_val_mahal_log_c_idx]}  Test - gamma: {gammas[min_test_mahal_log_c_idx]}"
-          f", score: {res['test_mahal_log_c'][min_test_mahal_log_c_idx]}\n"
-          f"Mahal Binary Logistic Regression: Validation - gamma: {gammas[min_val_mahal_log_idx]}, score: {res['train_mahal_log'][min_val_mahal_log_idx]}  Test - gamma: {gammas[min_test_mahal_log_idx]}"
-          f", score: {res['test_mahal_log'][min_test_mahal_log_idx]}\n"
-          f"Contin Logistic Regression (no kernel): Validation - score: {res['train_log_c'][min_val_log_c_idx]} Test - score: {res['test_log_c'][min_test_log_c_idx]}\n"
-          f"Binary Logistic Regression (no kernel): Validation - score: {res['train_log'][min_val_log_idx]} Test - score: {res['test_log'][min_test_log_idx]}")
+            clf_mahal = LogisticRegression(penalty='none', C=1e9, fit_intercept=True, class_weight="auto")
+            clf_idt = LogisticRegression(penalty='none', C=1e9, fit_intercept=True, class_weight="auto")
+
+            train_errs_mahal_auc[i] = np.mean(auc_mahal_val_scores, axis=0)
+            train_errs_idt_auc[i] = np.mean(auc_idt_val_scores, axis=0)
+
+            train_errs_mahal_ll[i] = np.mean(ll_mahal_val_scores, axis=0)
+            train_errs_idt_ll[i] = np.mean(ll_idt_val_scores, axis=0)
 
 
-    return res
+            K_train_mahal = calculate_mahal_kernel(X_train, X_train, prec_mat, gamma=g)
+            K_test_mahal = calculate_mahal_kernel(X_test, X_train, prec_mat, gamma=g)
+            K_train_idt = calculate_mahal_kernel(X_train, X_train, np.identity(X_train.shape[1]), gamma=g)
+            K_test_idt = calculate_mahal_kernel(X_test, X_train, np.identity(X_train.shape[1]), gamma=g)
+
+            # weights = np.zeros(len(y_train))
+            # unq = np.unique(y_train, return_counts=True)
+            # num_0, num_1 = unq[1][0], unq[1][1]
+            # tot = num_0 + num_1
+            # cl_0_idx = np.where(y_train == 0)
+            # cl_1_idx = np.where(y_train == 1)
+            # if num_0 > 2 * num_1:
+            #     weights[cl_0_idx] = 1.0
+            #     weights[cl_1_idx] = 2.0
+            # elif num_1 > 2 * num_0:
+            #     weights[cl_0_idx] = 2.0
+            #     weights[cl_1_idx] = 1.0
+            # clf_mahal.fit(scipy.sparse.coo_matrix(K_train_mahal), y_train, sample_weight=weights)
+            # clf_idt.fit(scipy.sparse.coo_matrix(K_train_idt), y_train, sample_weight=weights)
+
+            # prob_mahal = sigmoid(K_test_mahal @ clf_mahal.coef_[0])
+            # prob_idt = sigmoid(K_test_idt @ clf_idt.coef_[0])
+
+            clf_mahal.fit(K_train_mahal, y_train)
+            clf_idt.fit(K_train_idt, y_train)
+
+            prob_mahal = clf_mahal.predict_proba(K_test_mahal)[:,1]
+            prob_idt = clf_idt.predict_proba(K_test_idt)[:,1]
+
+            test_errs_mahal_auc[i] = roc_auc_score(y_test, prob_mahal)
+            test_errs_idt_auc[i] = roc_auc_score(y_test, prob_idt)
+
+            test_errs_mahal_ll[i] = log_loss(y_test, prob_mahal)
+            test_errs_idt_ll[i] = log_loss(y_test, prob_idt)
+
+        # print("Done")
+
+
+        return train_errs_mahal_auc, train_errs_mahal_ll, test_errs_mahal_auc, test_errs_mahal_ll, \
+               train_errs_idt_auc, train_errs_idt_ll, test_errs_idt_auc, test_errs_idt_ll
+    except Exception as e:
+        log_msg("Oh, no! An error occurred. Here is the error message")
+        log_msg(traceback.format_exc())
 
 def plot_ker_comp(gammas, res, k_1, k_2, x_title, y_title, x_scale=None, y_scale=None):
     fig = figure(figsize=(12, 8))
@@ -744,3 +890,112 @@ def preprocess_data(X_train, X_test):
     # y_test_t[idx_test] = -1
 
     return X_train_s, X_test_s
+
+class KernelLogisiticRegression(BaseEstimator):
+
+    def __init__(self, gamma=1.0, n_components=None,  assoc_mat=None,
+                    shrink_cov=False, fit_intercept=True, C=1e9, penalty="none", identity=False):
+        """
+        Constructs a model that performs Logisitic regression in the feature space indudced by a kernel
+        :param gamma: The rbf kernel paramter
+        :param n_components: The number of components to retain to construct the inverse of the covariance matrix
+        :param assoc_mat: The adjancency matrix to use a mask over precision matrix
+        :param shrink_cov: Whether to perform ridge-regression in estimating the covariance matrix
+        :param fit_intercept: Logistic Regression parameter - see https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegression.html
+        :param C: Logistic Regression parameter - see https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegression.html
+        :param penalty: Logistic Regression parameter - see https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegression.html
+        :param identity: Whether to use an identity matrix for mahalanobis distance
+        """
+
+        self.gamma = gamma
+        self.n_components = n_components
+        self.assoc_mat = assoc_mat
+        self.shrink_cov = shrink_cov
+        self.fit_intercept = fit_intercept
+        self.C = C
+        self.penalty = penalty
+        self.identity = False
+
+    def get_params(self, deep=True):
+        return {"gamma": self.gamma, "n_components": self.n_components, "assoc_mat": self.assoc_mat,
+                    "shrink_cov": self.shrink_cov, "fit_intercept": self.fit_intercept,
+                    "C": self.C, "penalty": self.penalty, "identity": self.identity}
+
+    def set_params(self, **params):
+        for parameter, value in params.items():
+            setattr(self, parameter, value)
+
+        return self
+
+    def fit(self, X, y):
+        self.X_ = X
+        if not self.identity:
+            self.prec_mat_ = self._get_prec_mat(self.X_, self.assoc_mat, self.n_components)
+        else:
+            self.prec_mat_ = np.identity(self.X_.shape[1])
+        K = calculate_mahal_kernel(self.X_, self.X_, self.prec_mat_, self.gamma)
+        self.clf_ = LogisticRegression(C=self.C, fit_intercept=self.fit_intercept, penalty=self.penalty)
+        self.clf_.fit(K, y)
+        self.coef_ = self.clf_.coef_
+        self.intercept_ = self.clf_.intercept_
+
+        return self
+
+    def predict(self, X):
+        K = calculate_mahal_kernel(X, self.X_, self.prec_mat_, self.gamma)
+        return self.clf_.predict(K)
+
+    def predict_proba(self, X):
+        K = calculate_mahal_kernel(X, self.X_, self.prec_mat_, self.gamma)
+        return self.clf_.predict_proba(K)[:,1]
+
+    def score(self, X, y):
+        probs = self.predict_proba(X)
+        return roc_auc_score(y, probs)
+
+    def decision_function(self, X):
+        K = calculate_mahal_kernel(X, self.X_, self.prec_mat_, self.gamma)
+        scores = K @ self.coef_.T + self.intercept_
+        return scores.ravel() if scores.shape[1] == 1 else scores
+
+    def _shrunk_cov_score(self, X):
+        shrinkages = np.logspace(-2, 0, 30)
+        cv = GridSearchCV(ShrunkCovariance(), {"shrinkage": shrinkages}, n_jobs=-1).fit(X)
+        return cv.best_estimator_, np.mean(cross_val_score(cv.best_estimator_, X))
+
+    def _get_prec_mat(self, X, M, n_component):
+        est = None
+        if self.shrink_cov:
+            est, _ = self._shrunk_cov_score(X)
+            cov = est.covariance_
+        else:
+            cov = np.cov(X, rowvar=False)
+        if n_component is None:
+            if M is None and self.shrink_cov:
+                return est.precision_
+            elif M is None and not self.shrink_cov:
+                return self._get_psd_mat(scipy.linalg.pinvh(cov))
+            elif M is not None and self.shrink_cov: return self._get_psd_mat(np.multiply(M, est.precision_))
+            else: return self._get_psd_mat(np.multiply(M, scipy.linalg.pinvh(cov)))
+
+        l, u = np.linalg.eigh(cov)
+        l = np.flip(l)
+        u = np.flip(u, axis=1)
+        l_p = l[:n_component]
+        l_p_inv = np.diag(1.0 / (l_p))
+        u_p = u[:n_component]
+        prec_mat = u_p.T @ l_p_inv @ u_p
+        if M is not None:
+            prec_mat = np.multiply(M, prec_mat)
+        prec_mat = self._get_psd_mat(prec_mat)
+        return prec_mat
+
+    def _get_psd_mat(self, X):
+        assert X.shape[0] == X.shape[1]
+        p = X.shape[0]
+        l, u = np.linalg.eigh(X)
+        # perturb the matrix by the smallest eigenvalue
+        if l[0] > 0.0: # the matrix is already PD, no need to perturb it further
+            return X
+        X = X + -l[0] * np.identity(p)
+        return X

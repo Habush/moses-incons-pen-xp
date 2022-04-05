@@ -17,7 +17,7 @@ moses_options = "-j 20 -m 20000 -W 1 --output-cscore 1 --output-deme-id 1 --resu
                 "--reduct-knob-building-effort 2 " \
                 "--hc-crossover-min-neighbors 5000 --hc-fraction-of-nn .4 " \
                 "--hc-crossover-pop-size 1200 " \
-                "-l DEBUG --output-format=combo"
+                "-l DEBUG --output-format=combo "
 
 
 def set_up_logging(wk_dir):
@@ -78,9 +78,9 @@ def parse_args():
 
 def split_dataset(train_file, n_folds, wk_dir, contin_path, target):
     df = pd.read_csv(train_file)
-    df_contin = pd.read_csv(contin_path)
+    # df_contin = pd.read_csv(contin_path)
     X, y = df[df.columns.difference([target])], df[target]
-    X_contin, y_contin = df_contin[df_contin.columns.difference([target])], df_contin[target]
+    # X_contin, y_contin = df_contin[df_contin.columns.difference([target])], df_contin[target]
     if n_folds > 0:
         skf = StratifiedKFold(n_splits=n_folds, random_state=k_fold_seed, shuffle=True)
 
@@ -90,11 +90,11 @@ def split_dataset(train_file, n_folds, wk_dir, contin_path, target):
 
         for train_idx, val_idx in skf.split(X, y):
             X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
-            X_train_c, y_train_c = X_contin.iloc[train_idx], y_contin.iloc[train_idx]
+            # X_train_c, y_train_c = X_contin.iloc[train_idx], y_contin.iloc[train_idx]
             X_val, y_val = X.iloc[val_idx], y.iloc[val_idx]
 
             df_train = pd.concat([y_train, X_train], axis=1)
-            df_train_c = pd.concat([y_train_c, X_train_c], axis=1)
+            # df_train_c = pd.concat([y_train_c, X_train_c], axis=1)
             df_val = pd.concat([y_val, X_val], axis=1)
             df_train_path = os.path.join(wk_dir, f"fold_{fold}_train.csv")
             df_val_path = os.path.join(wk_dir, f"fold_{fold}_val.csv")
@@ -102,7 +102,7 @@ def split_dataset(train_file, n_folds, wk_dir, contin_path, target):
 
             df_train.to_csv(df_train_path, index=False)
             df_val.to_csv(df_val_path, index=False)
-            df_train_c.to_csv(df_train_c_path, index=False)
+            # df_train_c.to_csv(df_train_c_path, index=False)
 
             folds[fold] = [df_train_path, df_val_path, df_train_c_path]
             fold += 1
@@ -119,14 +119,14 @@ def format_moses_opts(input_file, output_file, assoc_mat, pen, complexity_ratio,
            f"--complexity-ratio {complexity_ratio} -u {target_feature} "
 
     if pen:
-        opts = f"{opts} --rel-types IntensionalSimilarity --feature-type ConceptNode --scm-path {scm_path} " \
-               f"--inconsistency-gamma {gamma} --inconsistency-alpha {alpha} --assoc-mat {assoc_mat} --contin-path={cpath} "
+        opts = f"{opts} --inconsistency-gamma {gamma} --fs-alpha {alpha} --fs-assoc-mat {assoc_mat} " \
+               f"--enable-fs=1 --fs-focus=all --fs-algo=smd --fs-target-size=50 --fs-scorer=bp "
 
     if div_pressure > 0:
         opts = f"{opts} --diversity-pressure {div_pressure} "
 
-    if fs:
-        opts = f"{opts} --enable-fs=1 --fs-focus=all --fs-algo=smd --fs-target-size=6"
+    # if fs:
+    #     opts = f"{opts} --enable-fs=1 --fs-focus=all --fs-algo=smd --fs-target-size=50 "
 
     if xopts is not None:
         opts = f"{opts} {xopts} "
@@ -197,18 +197,18 @@ if __name__ == "__main__":
         print(f"Error: seed file {args.seed} doesn't exist or cannot be found!")
         exit(-1)
 
-    if args.inconsistency_pen:
-        if args.scm_path is None or args.scm_path == "":
-            print("Error: Inconsistency penalty option ON but atomese path not provided. "
-                  "Use the -s or --scm_path option to provide path to the atomese file.")
-            exit(-1)
-        if not os.path.exists(args.scm_path):
-            print(f"Error: Atomese file path {args.scm_path} doesn't exist or cannot be found!")
-            exit(-1)
-
-        if not os.path.exists(args.mat):
-            print(f"Error: Association matrix path {args.mat} doesn't exist or cannot be found!")
-            os.exit(-1)
+    # if args.inconsistency_pen:
+    #     if args.scm_path is None or args.scm_path == "":
+    #         print("Error: Inconsistency penalty option ON but atomese path not provided. "
+    #               "Use the -s or --scm_path option to provide path to the atomese file.")
+    #         exit(-1)
+    #     if not os.path.exists(args.scm_path):
+    #         print(f"Error: Atomese file path {args.scm_path} doesn't exist or cannot be found!")
+    #         exit(-1)
+    #
+    #     if not os.path.exists(args.mat):
+    #         print(f"Error: Association matrix path {args.mat} doesn't exist or cannot be found!")
+    #         os.exit(-1)
 
     seeds = []
 

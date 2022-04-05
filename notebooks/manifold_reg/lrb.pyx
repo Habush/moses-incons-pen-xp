@@ -357,7 +357,7 @@ cdef double sparse_line_search(double C, double D, double g, double h, double f_
     Q = base_Q + (D * quad_form(prev_w, A))
     prev_w[j] = prev_w_j
     R = base_R + C * abs(w_j)
-    cdef double f_new = L + R
+    cdef double f_new = L + Q + R
     cdef int count = 0
     # check for convergence (and also set an upper limit)
     while f_new - f_val > a * thresh and count < max_ls:
