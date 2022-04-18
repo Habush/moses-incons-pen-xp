@@ -24,7 +24,6 @@ from log_util import log_msg
 import traceback
 
 
-
 def is_positive_semidefinite(X):
     if X.shape[0] != X.shape[1]: # must be a square matrix
         return False
@@ -894,7 +893,7 @@ def preprocess_data(X_train, X_test):
 class KernelLogisiticRegression(BaseEstimator):
 
     def __init__(self, gamma=1.0, n_components=None,  assoc_mat=None,
-                    shrink_cov=False, fit_intercept=True, C=1e9, penalty="none", identity=False):
+                    shrink_cov=False, fit_intercept=True, penalty="none", identity=False):
         """
         Constructs a model that performs Logisitic regression in the feature space indudced by a kernel
         :param gamma: The rbf kernel paramter
@@ -902,7 +901,6 @@ class KernelLogisiticRegression(BaseEstimator):
         :param assoc_mat: The adjancency matrix to use a mask over precision matrix
         :param shrink_cov: Whether to perform ridge-regression in estimating the covariance matrix
         :param fit_intercept: Logistic Regression parameter - see https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegression.html
-        :param C: Logistic Regression parameter - see https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegression.html
         :param penalty: Logistic Regression parameter - see https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegression.html
         :param identity: Whether to use an identity matrix for mahalanobis distance
         """
@@ -912,14 +910,12 @@ class KernelLogisiticRegression(BaseEstimator):
         self.assoc_mat = assoc_mat
         self.shrink_cov = shrink_cov
         self.fit_intercept = fit_intercept
-        self.C = C
         self.penalty = penalty
         self.identity = False
 
     def get_params(self, deep=True):
         return {"gamma": self.gamma, "n_components": self.n_components, "assoc_mat": self.assoc_mat,
-                    "shrink_cov": self.shrink_cov, "fit_intercept": self.fit_intercept,
-                    "C": self.C, "penalty": self.penalty, "identity": self.identity}
+                    "shrink_cov": self.shrink_cov, "fit_intercept": self.fit_intercept, "penalty": self.penalty, "identity": self.identity}
 
     def set_params(self, **params):
         for parameter, value in params.items():
@@ -933,9 +929,10 @@ class KernelLogisiticRegression(BaseEstimator):
             self.prec_mat_ = self._get_prec_mat(self.X_, self.assoc_mat, self.n_components)
         else:
             self.prec_mat_ = np.identity(self.X_.shape[1])
-        K = calculate_mahal_kernel(self.X_, self.X_, self.prec_mat_, self.gamma)
-        self.clf_ = LogisticRegression(C=self.C, fit_intercept=self.fit_intercept, penalty=self.penalty)
-        self.clf_.fit(K, y)
+
+        self.K_ = calculate_mahal_kernel(self.X_, self.X_,  self.prec_mat_, self.gamma)
+        self.clf_ = LogisticRegression(fit_intercept=self.fit_intercept, penalty=self.penalty, class_weight='auto')
+        self.clf_.fit(self.K_, y)
         self.coef_ = self.clf_.coef_
         self.intercept_ = self.clf_.intercept_
 
@@ -961,30 +958,25 @@ class KernelLogisiticRegression(BaseEstimator):
     def _shrunk_cov_score(self, X):
         shrinkages = np.logspace(-2, 0, 30)
         cv = GridSearchCV(ShrunkCovariance(), {"shrinkage": shrinkages}, n_jobs=-1).fit(X)
-        return cv.best_estimator_, np.mean(cross_val_score(cv.best_estimator_, X))
+        return cv.best_estimator_
 
     def _get_prec_mat(self, X, M, n_component):
         est = None
         if self.shrink_cov:
-            est, _ = self._shrunk_cov_score(X)
+            est = self._shrunk_cov_score(X)
             cov = est.covariance_
         else:
             cov = np.cov(X, rowvar=False)
         if n_component is None:
-            if M is None and self.shrink_cov:
-                return est.precision_
-            elif M is None and not self.shrink_cov:
+            if M is None:
                 return self._get_psd_mat(scipy.linalg.pinvh(cov))
-            elif M is not None and self.shrink_cov: return self._get_psd_mat(np.multiply(M, est.precision_))
             else: return self._get_psd_mat(np.multiply(M, scipy.linalg.pinvh(cov)))
 
         l, u = np.linalg.eigh(cov)
         l = np.flip(l)
         u = np.flip(u, axis=1)
-        l_p = l[:n_component]
-        l_p_inv = np.diag(1.0 / (l_p))
-        u_p = u[:n_component]
-        prec_mat = u_p.T @ l_p_inv @ u_p
+        l_p_inv = np.diag(1.0 / (l[:n_component]))
+        prec_mat = u[:,:n_component] @ l_p_inv @ u[:,:n_component].T
         if M is not None:
             prec_mat = np.multiply(M, prec_mat)
         prec_mat = self._get_psd_mat(prec_mat)
