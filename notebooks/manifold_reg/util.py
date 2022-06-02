@@ -19,7 +19,6 @@ from sklearn.model_selection import KFold, StratifiedKFold, GridSearchCV, cross_
 from sklearn.base import BaseEstimator
 from datetime import datetime
 from sklearn.preprocessing import StandardScaler
-import lrb_init as lrb
 from log_util import log_msg
 import traceback
 
@@ -893,7 +892,7 @@ def preprocess_data(X_train, X_test):
 class KernelLogisiticRegression(BaseEstimator):
 
     def __init__(self, gamma=1.0, n_components=None,  assoc_mat=None,
-                    shrink_cov=False, fit_intercept=True, penalty="none", identity=False):
+                    shrink_cov=False, fit_intercept=True, penalty="none", identity=False, alpha=1.0):
         """
         Constructs a model that performs Logisitic regression in the feature space indudced by a kernel
         :param gamma: The rbf kernel paramter
@@ -912,10 +911,12 @@ class KernelLogisiticRegression(BaseEstimator):
         self.fit_intercept = fit_intercept
         self.penalty = penalty
         self.identity = False
+        self.alpha = alpha
 
     def get_params(self, deep=True):
         return {"gamma": self.gamma, "n_components": self.n_components, "assoc_mat": self.assoc_mat,
-                    "shrink_cov": self.shrink_cov, "fit_intercept": self.fit_intercept, "penalty": self.penalty, "identity": self.identity}
+                    "shrink_cov": self.shrink_cov, "fit_intercept": self.fit_intercept,
+                    "penalty": self.penalty, "identity": self.identity, "alpha": self.alpha}
 
     def set_params(self, **params):
         for parameter, value in params.items():
@@ -970,7 +971,7 @@ class KernelLogisiticRegression(BaseEstimator):
         if n_component is None:
             if M is None:
                 return self._get_psd_mat(scipy.linalg.pinvh(cov))
-            else: return self._get_psd_mat(np.multiply(M, scipy.linalg.pinvh(cov)))
+            else: return self._get_psd_mat(np.multiply((self.alpha * M), scipy.linalg.pinvh(cov)))
 
         l, u = np.linalg.eigh(cov)
         l = np.flip(l)
@@ -978,7 +979,7 @@ class KernelLogisiticRegression(BaseEstimator):
         l_p_inv = np.diag(1.0 / (l[:n_component]))
         prec_mat = u[:,:n_component] @ l_p_inv @ u[:,:n_component].T
         if M is not None:
-            prec_mat = np.multiply(M, prec_mat)
+            prec_mat = np.multiply((self.alpha * M), prec_mat)
         prec_mat = self._get_psd_mat(prec_mat)
         return prec_mat
 
@@ -991,3 +992,47 @@ class KernelLogisiticRegression(BaseEstimator):
             return X
         X = X + -l[0] * np.identity(p)
         return X
+
+def assign_cols(X, append_y=True):
+    cols = []
+    if append_y:
+        for i in range(X.shape[1] - 1):
+            cols.append(f"f{i + 1}")
+
+        cols.append("y")
+    else:
+        for i in range(X.shape[1]):
+            cols.append(f"f{i + 1}")
+    X.columns = cols
+
+def load_bmm_files(parent_dir):
+    net_dir = os.path.join(parent_dir, "net")
+    feat_dir = os.path.join(parent_dir, "feats")
+    data_dir = os.path.join(parent_dir, "data")
+
+    net_dfs = []
+    data_dfs = []
+    feat_ls = []
+    seed_str = ""
+
+    with open(os.path.join(parent_dir, "rand_seeds.txt"), "r") as fp:
+        seed_str = fp.readline().strip()
+
+    seeds = [int(s) for s in seed_str.split(',')]
+
+    for s in seeds:
+        data_df = pd.read_csv(os.path.join(data_dir, f"data_bm_{s}.csv"), header=None)
+        net_df = pd.read_csv(os.path.join(net_dir, f"feat_net_{s}.csv"), header=None)
+        with open(os.path.join(feat_dir, f"feats_{s}.txt"), "r") as fp:
+            feats_str = fp.readline().strip()
+
+        feats = [int(f) for f in feats_str.split(',')]
+
+        assign_cols(data_df)
+
+        data_dfs.append(data_df)
+        net_dfs.append(net_df)
+        feat_ls.append(feats)
+
+
+    return seeds, data_dfs, net_dfs, feat_ls
