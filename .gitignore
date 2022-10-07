@@ -132,4 +132,4 @@ dmypy.json
 
 data/*
 
-notebooks/manifold_reg/logging.py
+notebooks/variable_selection/logging.py
