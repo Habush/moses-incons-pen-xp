@@ -4,16 +4,26 @@ import numpy as np
 import os
 import sys
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold
 import optax
 from typing import NamedTuple
 from blackjax.types import PRNGKey
 import logging
+from logging import handlers
 import tensorflow_probability.substrates.jax as tfp
+import scipy.stats as stats
+import haiku as hk
+from torch.utils import data
 
 class Batch(NamedTuple):
     x: jnp.ndarray
     y: jnp.ndarray
+
+
+class TrainingState(NamedTuple):
+    params: hk.Params
+    avg_params: hk.Params
+    opt_state: optax.OptState
 
 def generate_synthetic_data(*, key, num_tf, num_genes,
                             tf_on, num_samples, binary, val_tf=4):
@@ -146,13 +156,15 @@ def load_bmm_files(parent_dir):
 
     return seeds, data_dfs, net_dfs, feat_ls
 
-def prepare_data(seeds, seed_idx, data, nets, test_size=0.3):
+def prepare_data(seeds, seed_idx, data, nets, out_val_size=0.3, test_size=0.3):
     seed = seeds[seed_idx]
     X, y = data[seed_idx].iloc[:,:-1].to_numpy().astype(np.float), data[seed_idx].iloc[:,-1].to_numpy().astype(np.float)
-    print(np.unique(y, return_counts=True))
+    # print(np.unique(y, return_counts=True))
     X_train, X_test, y_train, y_test = train_test_split(X, y, random_state=seed, shuffle=True, stratify=y, test_size=test_size)
+    X_train, X_out_val, y_train, y_out_val = train_test_split(X_train, y_train, random_state=seed,
+                                                              shuffle=True, stratify=y_train, test_size=out_val_size)
     net = nets[seed_idx].to_numpy()
-    return seed, net, (X_train, X_test, y_train, y_test)
+    return seed, net, (X_train, X_out_val, X_test, y_train, y_out_val, y_test)
 
 def recall(y_true, y_pred):
     true_positives = jnp.sum(jnp.round(jnp.clip(y_true * y_pred, 0, 1)))
@@ -408,6 +420,28 @@ def compute_updated_ensemble_predictions_classification(
         new_ensemble_predicted_probs = new_predicted_probs
     return new_ensemble_predicted_probs
 
+def make_constant_lr_schedule_with_cosine_burnin(init_lr, final_lr,
+                                                 burnin_steps):
+    """Cosine LR schedule with burn-in for SG-MCMC."""
+
+    def schedule(step):
+        t = jnp.minimum(step / burnin_steps, 1.)
+        coef = (1 + jnp.cos(t * np.pi)) * 0.5
+        return coef * init_lr + (1 - coef) * final_lr
+
+    return schedule
+
+def make_cyclical_cosine_lr_schedule(init_lr, total_steps, cycle_length):
+    """Cosine LR schedule with burn-in for SG-MCMC."""
+
+    def schedule(step):
+        k = total_steps // cycle_length
+        t = (step % k) / k
+        coef = (1 + jnp.cos(t * np.pi)) * 0.5
+        return coef * init_lr
+
+    return schedule
+
 def make_cyclical_cosine_lr_schedule_with_const_burnin(init_lr, burnin_steps,
                                                        cycle_length):
 
@@ -418,21 +452,20 @@ def make_cyclical_cosine_lr_schedule_with_const_burnin(init_lr, burnin_steps,
 
     return schedule
 
-def make_step_size_fn(init_lr, schedule, alpha, n_samples, n_warmup,
+def make_step_size_fn(init_lr, schedule, alpha, n_samples,
                       cycle_len):
-    k = n_samples - n_warmup
     if schedule == "constant":
         return lambda _: init_lr
 
     if schedule == "exponential":
         return optax.exponential_decay(init_lr, decay_rate=alpha,
-                                       transition_begin=n_warmup, transition_steps=k)
+                                       transition_begin=0, transition_steps=n_samples)
 
     if schedule == "cyclical":
         if cycle_len is None or cycle_len < 0:
-            cycle_len = 500
+            cycle_len = 10
 
-        return make_cyclical_cosine_lr_schedule_with_const_burnin(init_lr, n_warmup, cycle_len)
+        return make_cyclical_cosine_lr_schedule(init_lr, n_samples, cycle_len)
 
 def make_batch(idx, x, y):
     return Batch(x[idx], y[idx])
@@ -458,6 +491,121 @@ def get_model_pred(model, params, x):
     pred_probs = jax.nn.sigmoid(logits)
     return pred_probs
 
+def cross_entropy_loss(model, x, y, params, gamma):
+    logits = model.apply(params, x, gamma).ravel()
+    loss = optax.sigmoid_binary_cross_entropy(logits, y)
+    return log_ll
+
+def mse_loss(model, x, y, params, gamma):
+    preds = model.apply(params, x, gamma).ravel()
+    loss = jnp.mean(optax.l2_loss(preds, y))
+    return loss
+
+def fisher_exact_test(X, y, thres=0.05):
+    cols = X.columns
+    p_values = np.zeros(len(cols))
+    for i, col in enumerate(cols):
+        table = pd.crosstab(y, X[col])
+        _, p_val = stats.fisher_exact(table, alternative="two-sided")
+        p_values[i] = p_val
+
+    idx_sig = np.argwhere(p_values < thres)
+    print(f"Total of {len(idx_sig)} variables are significant (p_val = {thres})")
+
+    return idx_sig
+
+
+def build_network(X, net_intr, net_intr_rev):
+    p = X.shape[1]
+    J = np.zeros((p, p))
+    cols = X.columns
+    intrs = []
+    intrs_rev = []
+    for i, g1 in enumerate(cols):
+        try:
+            g_intrs = net_intr.loc[g1]
+            if isinstance(g_intrs, int):
+                g_intrs = [g_intrs]
+            else:
+                g_intrs = list(g_intrs)
+            for g2 in g_intrs:
+                if (g2, g1) not in intrs_rev: # check if we haven't encountered the reverse interaction
+                    j = cols.get_loc(g2)
+                    J[i, j] = 1.0
+                    J[j, i] = 1.0
+                    intrs.append((g1, g2))
+        except KeyError:
+            continue
+
+        # Check the reverse direction
+        try:
+            g_intrs_rev = net_intr_rev.loc[g1]
+            if isinstance(g_intrs_rev, int):
+                g_intrs_rev = [g_intrs_rev]
+            else:
+                g_intrs_rev = list(g_intrs_rev)
+            for g2 in g_intrs_rev:
+                if (g1, g2) not in intrs:
+                    j = cols.get_loc(g2)
+                    J[i, j] = 1.0
+                    J[j, i] = 1.0
+                    intrs_rev.append((g2, g1))
+
+        except KeyError:
+            continue
+
+
+    return J
+
+def build_network_string(gene_names, string_ppi):
+
+    net_intr = pd.Series(string_ppi["symbolA"].values, index=string_ppi["symbolB"])
+    net_intr_rev = pd.Series(string_ppi["symbolB"].values, index=string_ppi["symbolA"]) 
+
+    p = len(gene_names)
+    J = np.zeros((p, p))
+    intrs = []
+    intrs_rev = []
+    for i, g1 in enumerate(gene_names):
+        try:
+            g_intrs = net_intr.loc[g1]
+            if isinstance(g_intrs, int):
+                g_intrs = [g_intrs]
+            else:
+                g_intrs = list(g_intrs)
+            for g2 in g_intrs:
+                if (g2, g1) not in intrs_rev: # check if we haven't encountered the reverse interaction
+                    if g2 in gene_names:
+                        j = gene_names.index(g2)
+                        weight = string_ppi[(string_ppi["symbolA"] == g1) & (string_ppi["symbolB"] == g2)]["weight"].values[0]
+                        J[i, j] = weight
+                        J[j, i] = weight
+                        intrs.append((g1, g2))
+        except KeyError:
+            continue
+
+        # Check the reverse direction
+        try:
+            g_intrs_rev = net_intr_rev.loc[g1]
+            if isinstance(g_intrs_rev, int):
+                g_intrs_rev = [g_intrs_rev]
+            else:
+                g_intrs_rev = list(g_intrs_rev)
+            for g2 in g_intrs_rev:
+                if (g1, g2) not in intrs:
+                    if g2 in gene_names:
+                        j = gene_names.index(g2)
+                        weight = string_ppi[(string_ppi["symbolB"] == g1) & (string_ppi["symbolA"] == g2)]["weight"].values[0]
+                        J[i, j] = weight
+                        J[j, i] = weight
+                        intrs_rev.append((g2, g1))
+
+        except KeyError:
+            continue
+
+
+    return J
+
 def setup_logger(log_path, seed):
     logging.getLogger().handlers = []
     logging.getLogger().setLevel(logging.NOTSET)
@@ -469,11 +617,56 @@ def setup_logger(log_path, seed):
     console.setFormatter(formatter)
     logging.getLogger().addHandler(console)
 
-    rotatingHandler = logging.handlers.RotatingFileHandler(filename=f"{log_path}/logs/log_s_{seed}.log", maxBytes=(1048576*5),
-                                                           backupCount=7)
-    rotatingHandler.setLevel(logging.INFO)
-    rotatingHandler.setFormatter(formatter)
-    logging.getLogger().addHandler(rotatingHandler)
+    if log_path is None or log_path == "":
+        if not os.path.exists(f"{log_path}/logs"):
+            os.makedirs(f"{log_path}/logs")
+
+        rotatingHandler = logging.handlers.RotatingFileHandler(filename=f"{log_path}/logs/log_s_{seed}.log", maxBytes=(1048576*5),
+                                                               backupCount=7)
+        rotatingHandler.setLevel(logging.INFO)
+        rotatingHandler.setFormatter(formatter)
+        logging.getLogger().addHandler(rotatingHandler)
     log = logging.getLogger()
     return log
 
+
+def numpy_collate(batch):
+  if isinstance(batch[0], np.ndarray):
+    return np.stack(batch)
+  elif isinstance(batch[0], (tuple,list)):
+    transposed = zip(*batch)
+    return [numpy_collate(samples) for samples in transposed]
+  else:
+    return np.array(batch)
+
+class NumpyData(data.Dataset):
+
+    def __init__(self, X, y):
+        self.data = X
+        self.target = y
+        self.size = X.shape[0]
+
+    def __len__(self):
+        return self.size
+
+    def __getitem__(self, idx):
+        x, y = self.data[idx], self.target[idx]
+        return x, y
+
+class NumpyLoader(data.DataLoader):
+  def __init__(self, dataset, batch_size=1,
+                shuffle=False, sampler=None,
+                batch_sampler=None, num_workers=0,
+                pin_memory=False, drop_last=False,
+                timeout=0, worker_init_fn=None):
+    super(self.__class__, self).__init__(dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        sampler=sampler,
+        batch_sampler=batch_sampler,
+        num_workers=num_workers,
+        collate_fn=numpy_collate,
+        pin_memory=pin_memory,
+        drop_last=drop_last,
+        timeout=timeout,
+        worker_init_fn=worker_init_fn)

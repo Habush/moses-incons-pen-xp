@@ -13,7 +13,7 @@ grammar = r'''
     rpar: ")"
     and_or: "and" | "or"
     negate: "!" feature
-    feature: "$" name
+    feature: "$f" name 
     name: /[^$!()]+/
     
     %import common.ESCAPED_STRING

@@ -105,8 +105,9 @@ class MixedSGMCMC(ClassifierMixin):
 
 
         chain_keys = jax.random.split(key_init, self.n_chains)
-        init_state = jax.vmap(make_init_mixed_state, in_axes=(0, None, None, None))(chain_keys,
-                                                                    self.model_, data, self.batch_size)
+        init_state = jax.vmap(make_init_mixed_state, in_axes=(0, None, None, None, None, None))(chain_keys,
+                                                                    self.model_, self.alpha,
+                                                                    p, data, data_size)
 
         warmup_states, states = inference_loop_multiple_chains(key_samples, kernel, init_state, self.lr_schedule ,data, self.batch_size,
                                                                                 self.n_samples, self.n_warmup,
@@ -120,12 +121,12 @@ class MixedSGMCMC(ClassifierMixin):
 
         discrete_position = tree_utils.combine_dims(states.discrete_position, start_dim)
         contin_position = tree_utils.combine_dims(states.contin_position, start_dim)
-        # disc_precond = tree_utils.combine_dims(states.disc_precond, start_dim)
-        # contin_precond = tree_utils.combine_dims(states.contin_precond, start_dim)
+        disc_precond = tree_utils.combine_dims(states.disc_precond, start_dim)
+        contin_precond = tree_utils.combine_dims(states.contin_precond, start_dim)
 
         # discrete_position = discrete_position[::self.thinning_interval,]
         # contin_position = jax.tree_util.tree_map(lambda pos: pos[::self.thinning_interval,], contin_position)
-        self.states_ = MixedState(states.count, discrete_position, contin_position)
+        self.states_ = MixedState(states.count, discrete_position, contin_position, disc_precond, contin_precond)
 
 
         if self.lr_schedule != "cyclical":
@@ -135,7 +136,7 @@ class MixedSGMCMC(ClassifierMixin):
             disc_precond = tree_utils.combine_dims(warmup_states.disc_precond, 2)
             contin_precond = tree_utils.combine_dims(warmup_states.contin_precond, 2)
 
-            self.warmup_states_ = MixedState(warmup_states.count, discrete_position, contin_position)
+            self.warmup_states_ = MixedState(warmup_states.count, discrete_position, contin_position, disc_precond, contin_precond)
 
         return self
 

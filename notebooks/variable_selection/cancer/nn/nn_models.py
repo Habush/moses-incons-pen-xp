@@ -18,6 +18,18 @@ def make_mixed_net_fn(*, layer_dims, activation_fns ,output_dim):
 
     return forward
 
+def make_net_fn(*, layer_dims, activation_fns, output_dim):
+    assert len(layer_dims) == len(activation_fns)
+    def forward(x):
+        x = hk.Flatten()(x)
+        for layer_dim, activation_fn in zip(layer_dims, activation_fns):
+            x = hk.Linear(layer_dim)(x)
+            x = get_activation_fn(activation_fn)(x)
+        x = hk.Linear(output_dim)(x)
+        return x
+
+    return forward
+
 def get_activation_fn(fn_name):
     if fn_name == "tanh":
         return jax.nn.tanh

@@ -1,4 +1,5 @@
 # Author Abdulrahman S. Omar <hsamireh@gmail.com>
+
 import os
 import argparse
 import jax
@@ -12,16 +13,17 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.base import BaseEstimator, ClassifierMixin
 import nn_util
 import tree_utils
-from gibbs_sampler import *
+from gibbs_sampler_cyclical_bkp import *
 import nn_models as models
 import functools
+
 
 class MixedSGMCMC(ClassifierMixin):
 
     def __init__(self, seed=1234, disc_lr=1e-5, contin_lr=1e-5, sigma=1.0, eta=0.1, mu=0.1,
-                 alpha=0.95, batch_size=50, n_samples=10_000, n_warmup=1_000, n_chains=1,
-                 num_cycles=10, lr_schedule="constant", temp=1.0, beta=0.5, layer_dims=None, output_dim=1,
-                 thinning_interval=100, classifier=True):
+                 alpha=0.99, batch_size=50, n_samples=10_000, n_warmup=1_000, n_chains=1,
+                 num_cycles=10, lr_schedule="cyclical", temp=1.0, beta=0.5, layer_dims=None, output_dim=1, 
+                 classifier=True):
 
         self.seed = seed
         self.disc_lr = disc_lr
@@ -44,7 +46,6 @@ class MixedSGMCMC(ClassifierMixin):
             self.layer_dims = layer_dims
 
         self.output_dim = output_dim
-        self.thinning_interval = thinning_interval
 
         self._classifier = classifier
 
@@ -52,7 +53,6 @@ class MixedSGMCMC(ClassifierMixin):
             self._estimator_type = "classifier"
         else:
             self._estimator_type = "regression"
-
 
     def fit(self, X, y, J=None, activation_fns=None):
 
@@ -104,38 +104,31 @@ class MixedSGMCMC(ClassifierMixin):
                                                disc_step_size_fn, contin_step_size_fn))
 
 
-        chain_keys = jax.random.split(key_init, self.n_chains)
-        init_state = jax.vmap(make_init_mixed_state, in_axes=(0, None, None, None))(chain_keys,
-                                                                    self.model_, data, self.batch_size)
+        init_states = []
+        key_chains = jax.random.split(key_init, self.n_chains)
 
-        warmup_states, states = inference_loop_multiple_chains(key_samples, kernel, init_state, self.lr_schedule ,data, self.batch_size,
-                                                                                self.n_samples, self.n_warmup,
-                                                                                self.n_chains, num_cycles=self.num_cycles,
-                                                                                beta=self.beta)
+        for i in range(self.n_chains):
+            init_states.append(make_init_mixed_state(key_chains[i], self.model_, self.alpha, p, data, data_size))
 
-        if self.lr_schedule == "cyclical":
-            start_dim = 3
+        disc_states, contin_states = inference_loop_multiple_chains(key_samples, kernel, init_states, data, self.batch_size,
+                                                                    self.n_samples, self.num_cycles,
+                                                                    beta=self.beta, n_chains=self.n_chains)
+
+
+        if self.n_warmup > 0:
+            disc_pos = tree_utils.tree_stack(np.array(disc_states)[:,self.n_warmup:])
+            # contin_pos = tree_utils.tree_stack([tree_utils.tree_stack(contin_states[i]) for i in range(self.n_chains)])
+            contin_pos = tree_utils.tree_stack([tree_utils.tree_stack(contin_states[i]) for i in range(self.n_chains)])
+            contin_pos = jax.tree_util.tree_map(lambda x: x[:,self.n_warmup:], contin_pos)
+
         else:
-            start_dim = 2
+            disc_pos = tree_utils.tree_stack(np.array(disc_states))
+            contin_pos = tree_utils.tree_stack([tree_utils.tree_stack(contin_states[i]) for i in range(self.n_chains)])
 
-        discrete_position = tree_utils.combine_dims(states.discrete_position, start_dim)
-        contin_position = tree_utils.combine_dims(states.contin_position, start_dim)
-        # disc_precond = tree_utils.combine_dims(states.disc_precond, start_dim)
-        # contin_precond = tree_utils.combine_dims(states.contin_precond, start_dim)
-
-        # discrete_position = discrete_position[::self.thinning_interval,]
-        # contin_position = jax.tree_util.tree_map(lambda pos: pos[::self.thinning_interval,], contin_position)
-        self.states_ = MixedState(states.count, discrete_position, contin_position)
-
-
-        if self.lr_schedule != "cyclical":
-            # TODO: Remove keeping warmup samples. It just for diagnostics
-            discrete_position = tree_utils.combine_dims(warmup_states.discrete_position, 2)
-            contin_position = tree_utils.combine_dims(warmup_states.contin_position, 2)
-            disc_precond = tree_utils.combine_dims(warmup_states.disc_precond, 2)
-            contin_precond = tree_utils.combine_dims(warmup_states.contin_precond, 2)
-
-            self.warmup_states_ = MixedState(warmup_states.count, discrete_position, contin_position)
+        # self.mu, self.sigma = contin_pos["mu"], contin_pos["sigma"]
+        self.states_ = MixedState(self.n_samples, disc_pos, contin_pos, None, None)
+        self.disc_states = disc_states
+        self.contin_states = contin_states
 
         return self
 
@@ -148,7 +141,7 @@ class MixedSGMCMC(ClassifierMixin):
         else:
             pred_fn = lambda p, g: self.model_.apply(p, X, g).ravel()
 
-        preds = jax.vmap(pred_fn)(self.states_.contin_position, self.states_.discrete_position)
+        preds = jax.vmap(jax.vmap(pred_fn))(self.states_.contin_position, self.states_.discrete_position)
 
         return jnp.mean(preds, axis=0).ravel() #ensemble predictions
 

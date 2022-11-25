@@ -17,7 +17,6 @@ def parse_args():
     parser.add_argument("--dataset", type=str, default=None, required=True, help="path to the dataset")
     parser.add_argument("--exp-dir", type=str, default=None, required=True, help="path to the experiment result dir")
     parser.add_argument("--dir", type=str, default=None, required=True, help="directory to save results")
-    parser.add_argument("--cosmic-path", type=str, default=None, required=True, help="Path to cosmic genes list")
     parser.add_argument("--seed", type=str, default=None, required=True, help="path to the seeds file")
     parser.add_argument("--num-feats", type=int, default=70, help="Number of features to select")
     parser.add_argument("--out-label", type=str, default="posOutcome", help="The column name of the output label")
@@ -25,17 +24,20 @@ def parse_args():
 
 
 
-def run_logistc_regression(X_train, X_test, y_train, y_test, cv, logger):
+def run_logistc_regression(X_train, X_test, y_train, y_test, cv, logger=None, verbose=1):
 
     log_param_grid = {"C": np.logspace(-2, 1, 10)}
-    log_grid_cv = GridSearchCV(estimator=LogisticRegression(max_iter=10000), param_grid=log_param_grid, verbose=1,
+    log_grid_cv = GridSearchCV(estimator=LogisticRegression(max_iter=10000), param_grid=log_param_grid, verbose=verbose,
                                scoring="roc_auc", cv=cv).fit(X_train, y_train)
-    logger.info(f"LR best params {log_grid_cv.best_params_}")
+
+    if logger is not None:
+        logger.info(f"LR best params {log_grid_cv.best_params_}")
     clf = LogisticRegression(max_iter=10000,  **log_grid_cv.best_params_)
     log_cv_score = np.mean(cross_val_score(clf, X_train, y_train, scoring="roc_auc", cv=cv))
     clf.fit(X_train, y_train)
     log_test_score = roc_auc_score(y_test, clf.predict_proba(X_test)[:, 1])
-    logger.info(f"LR scores - cv score: {log_cv_score: .4f}, test_score: {log_test_score: .4f}")
+    if logger is not None:
+        logger.info(f"LR scores - cv score: {log_cv_score: .4f}, test_score: {log_test_score: .4f}")
     return log_grid_cv.best_params_, log_cv_score, log_test_score
 
 def run_moses(seed, X_train, X_test, y_train, y_test, out_label, cv, logger):
@@ -52,7 +54,9 @@ def run_moses(seed, X_train, X_test, y_train, y_test, out_label, cv, logger):
     moses_cv_score = moses_grid_cv.best_score_
     moses_est.fit(X_train, y_train, output_label=out_label)
     moses_test_score = moses_est.score(X_test, y_test)
-    logger.info(f"MOSES scores - cv score: {moses_cv_score: .4f}, test_score: {moses_test_score: .4f}")
+
+    if logger is not None:
+        logger.info(f"MOSES scores - cv score: {moses_cv_score: .4f}, test_score: {moses_test_score: .4f}")
 
     train_eval_out = moses_est._eval_models(moses_est.models_, assign_cols(X_train)).T
     test_eval_out = moses_est._eval_models(moses_est.models_, assign_cols(X_test)).T
@@ -133,12 +137,14 @@ def main():
     print(f"Total {len(exp_seeds)} runs")
 
     for seed in exp_seeds:
-        print(f"Running seed {seed}")
+        print(f"Running seed - {seed}")
         try:
             run_seed(seed, X_df, y_df, exp_dir_path, save_dir_path, nfeats, out_col)
 
         except Exception as e:
             print(f"Ran into an error {e} while running seed {seed}. Skipping it..")
+
+        print(f"Done for seed - {seed}")
 
     print("Done!")
 
