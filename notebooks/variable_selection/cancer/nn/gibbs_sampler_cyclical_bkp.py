@@ -33,6 +33,10 @@ class MixedState(NamedTuple):
     disc_logprob_grad: PyTree
     contin_logprob_grad: PyTree
 
+class OptaxState(NamedTuple):
+
+    disc_state: optax.OptState
+    contin_state: optax.OptState
 
 class SGLDState(NamedTuple):
     """Holds infor about a continous r.v - # used when using only the contin variables """
@@ -80,7 +84,8 @@ def make_gaussian_likelihood(sigma, temperature, data_size):
         log_likelihood = -(0.5 * se * weight_decay +
                             0.5 * jnp.log(weight_decay / ( 2 * jnp.pi)))
 
-        return data_size*jnp.mean(log_likelihood)
+        # return data_size*jnp.mean(log_likelihood)
+        return log_likelihood
 
     return gaussian_log_likelihood
 
@@ -93,18 +98,11 @@ def make_clf_log_likelihood(temperature, data_size):
         labels = jax.nn.one_hot(y, num_classes)
         log_likelihood = (labels * jax.nn.log_softmax(logits)) / temperature
 
-        return data_size*jnp.mean(log_likelihood)
+        # return data_size*jnp.mean(log_likelihood)
+        return log_likelihood
     
     return clf_log_likelihood
 
-
-def update_grad(grad_prior, grad_ll, state, data_size, temp):
-    v = jax.tree_util.tree_map(lambda v, g: state.alpha*v + (1 - state.alpha)*(g**2),
-                               state.v, grad_ll) # Calcuate the Exponentially Moving Weight Average (EWMA)
-    grad = jax.tree_util.tree_map(lambda gp, gl: temp*((gp/data_size) + gl), # Acc. Equation 7 of Wenzel et.al 2020 re-scale the prior by 1/n, n - training size
-                                  grad_prior, grad_ll)
-
-    return grad, PreconditionState(v, state.alpha)
 
 def generate_discrete_grad_estimator(model, logprior_fn, log_likelihood_fn):
 
@@ -134,13 +132,13 @@ def generate_mixed_contin_grad_estimator(model, logprior_fn, log_likelihood_fn):
 
 
 def proposal_noisy(key, theta, grad_theta, step_size):
-  diff = (grad_theta*-(2*theta - 1)) - (1./(2*step_size))
+  diff = (0.5*grad_theta*-(2*theta - 1)) - (1./(2*step_size))
   delta = jax.random.bernoulli(key, jax.nn.sigmoid(diff))
   theta_delta = (1 - theta)*delta + theta*(1 - delta)
   return theta_delta*1.
 
 def proposal(theta, grad_theta, step_size):
-  diff = (grad_theta*-(2*theta - 1)) - (1./(2*step_size))
+  diff = (0.5*grad_theta*-(2*theta - 1)) - (1./(2*step_size))
   prob = jax.nn.sigmoid(diff)
   prob_inv = 1 - prob
   prob = prob[...,None]
@@ -151,32 +149,45 @@ def proposal(theta, grad_theta, step_size):
   return theta_delta*1.
 
 
-def take_discrete_step(rng_key: PRNGKey, state: MixedState, disc_grad_fn: Callable,
-                       batch: Tuple[np.ndarray, np.ndarray], step_size: float) -> Tuple[PyTree, PyTree, PyTree]:
+def take_discrete_step(rng_key: PRNGKey, state: MixedState, opt_state: optax.OptState,
+                       disc_grad_fn: Callable, disc_optim: optax.GradientTransformation,
+                       batch: Tuple[np.ndarray, np.ndarray], step_size: float) -> Tuple[PyTree, PyTree, PyTree, optax.OptState]:
 
     """SGLD update for the discrete variable. Ref: Zhang et.al 2022 (https://arxiv.org/abs/2206.09914) - Alogrithm 2"""
     disc_pos, contin_pos = state.discrete_position, state.contin_position
-    logprob, logrpob_grad = disc_grad_fn(contin_pos, disc_pos, batch)
-    new_pos = proposal(state.discrete_position, logrpob_grad, step_size)
+    p = disc_pos.shape[-1]
+    logprob, logprob_grad = jnp.zeros(p), jnp.zeros(p)
+    # logprob, logprob_grad = disc_grad_fn(contin_pos, disc_pos, batch)
+    # updates, opt_state = disc_optim.update(logprob_grad, opt_state)
+    # new_pos = proposal(state.discrete_position, updates, step_size)
+    new_pos = jnp.ones(p)
+    return new_pos, logprob, logprob_grad, opt_state
 
-    return new_pos, logprob, logrpob_grad
-
-def take_discrete_step_noisy(rng_key: PRNGKey, state: MixedState, disc_grad_fn: Callable,
-                            batch: Tuple[np.ndarray, np.ndarray], step_size: float) -> Tuple[PyTree, PyTree, PyTree]:
+def take_discrete_step_noisy(rng_key: PRNGKey, state: MixedState, opt_state: optax.OptState,
+                            disc_grad_fn: Callable, disc_optim: optax.GradientTransformation,
+                            batch: Tuple[np.ndarray, np.ndarray], step_size: float) -> Tuple[PyTree, PyTree, PyTree, optax.OptState]:
 
     """SGLD update for the discrete variable. Ref: Zhang et.al 2022 (https://arxiv.org/abs/2206.09914) - Alogrithm 2"""
 
-    _, key_rmh, key_accept = jax.random.split(rng_key, 3)
+    # _, key_rmh, key_accept = jax.random.split(rng_key, 3)
 
     disc_pos, contin_pos = state.discrete_position, state.contin_position
-    logprob, logrpob_grad = disc_grad_fn(contin_pos, disc_pos, batch)
-    new_pos = proposal_noisy(key_rmh, state.discrete_position, logrpob_grad, step_size)
+    # logprob, logprob_grad = disc_grad_fn(contin_pos, disc_pos, batch)
+    # updates, opt_state = disc_optim.update(logprob_grad, opt_state)
+    # new_pos = proposal_noisy(key_rmh, state.discrete_position, updates, step_size)
 
-    return new_pos, logprob, logrpob_grad
+    # return new_pos, logprob, logprob_grad, opt_state
+    disc_pos, contin_pos = state.discrete_position, state.contin_position
+    p = disc_pos.shape[-1]
+    logprob, logprob_grad = jnp.zeros(p), jnp.zeros(p)
+    new_pos = jnp.ones(p)
+    return new_pos, logprob, logprob_grad, opt_state
 
-def take_mixed_contin_step(rng_key: PRNGKey, state: MixedState, contin_grad_fn: Callable,
+
+def take_mixed_contin_step(rng_key: PRNGKey, state: MixedState, opt_state: optax.OptState,
+                           contin_grad_fn: Callable, contin_optim: optax.GradientTransformation,
                            batch: Tuple[np.ndarray, np.ndarray], 
-                           step_size: float) -> Tuple[PyTree, PyTree, PyTree]:
+                           step_size: float) -> Tuple[PyTree, PyTree, PyTree, optax.OptState]:
 
     """The same as above but the log-probability depends on a discrete r.v as we're working with mixed distribution"""
 
@@ -184,14 +195,16 @@ def take_mixed_contin_step(rng_key: PRNGKey, state: MixedState, contin_grad_fn: 
 
     disc_pos, contin_pos = state.discrete_position, state.contin_position
     logprob, logprob_grad = contin_grad_fn(contin_pos, disc_pos, batch)
-    params = jax.tree_util.tree_map(lambda p, g: p + step_size*g, 
-                                            contin_pos, logprob_grad)
+    updates, opt_state = contin_optim.update(logprob_grad, opt_state)
+    
+    params = optax.apply_updates(contin_pos, updates)
 
-    return params, logprob, logprob_grad
+    return params, logprob, logprob_grad, opt_state
 
-def take_mixed_contin_step_noisy(rng_key: PRNGKey, state: MixedState, contin_grad_fn: Callable,
-                           batch: Tuple[np.ndarray, np.ndarray],
-                           step_size: float) -> Tuple[PyTree, PyTree, PyTree]:
+def take_mixed_contin_step_noisy(rng_key: PRNGKey, state: MixedState, opt_state: optax.OptState,
+                                contin_grad_fn: Callable, contin_optim: optax.GradientTransformation,
+                                batch: Tuple[np.ndarray, np.ndarray], 
+                                step_size: float) -> Tuple[PyTree, PyTree, PyTree, optax.OptState]:
 
     """The same as above but the log-probability depends on a discrete r.v as we're working with mixed distribution"""
 
@@ -199,14 +212,19 @@ def take_mixed_contin_step_noisy(rng_key: PRNGKey, state: MixedState, contin_gra
 
     disc_pos, contin_pos = state.discrete_position, state.contin_position
     logprob, logprob_grad = contin_grad_fn(contin_pos, disc_pos, batch)
+    updates, opt_state = contin_optim.update(logprob_grad, opt_state)
+    params = optax.apply_updates(contin_pos, updates)
+
     noise = generate_gaussian_noise(key_integrator, contin_pos)
-    params = jax.tree_util.tree_map(lambda p, g, n: p + step_size*g + (jnp.sqrt(2 * step_size)*n), 
-                                            contin_pos, logprob_grad, noise)
+    params = jax.tree_util.tree_map(lambda p, n: p + (jnp.sqrt(2 * step_size)*n), 
+                                            params, noise) # Add noise
 
-    return params, logprob, logprob_grad
+    return params, logprob, logprob_grad, opt_state
 
 
-def get_mixed_sgld_kernel(discrete_grad_est: Callable, contin_grad_est:Callable) -> Callable:
+
+def get_mixed_sgld_kernel(discrete_grad_est: Callable, contin_grad_est:Callable, 
+                                disc_optim: optax.GradientTransformation, contin_optim: optax.GradientTransformation) -> Callable:
     """
     Constructs the kernel for sampling from the mixed distribution
     :param discrete_grad_est: Gradient estimator for the discrete variable
@@ -215,8 +233,8 @@ def get_mixed_sgld_kernel(discrete_grad_est: Callable, contin_grad_est:Callable)
     :param contin_step_size_fn: Learning rate schedule for contin variable
     :return: The Gibbs sampler kernel
     """
-    def one_step(rng_key: PRNGKey, state: MixedState, batch: Tuple[np.ndarray, np.ndarray], 
-                    disc_step_size: float, contin_step_size: float) -> MixedState:
+    def one_step(rng_key: PRNGKey, state: MixedState, opt_state: OptaxState, batch: Tuple[np.ndarray, np.ndarray],
+                    disc_step_size: float, contin_step_size: float) -> Tuple[MixedState, OptaxState]:
         """
         Main function (kernel) that does the gibbs sampling
         :param rng_key: PRNGKey for controlled randomness
@@ -227,22 +245,29 @@ def get_mixed_sgld_kernel(discrete_grad_est: Callable, contin_grad_est:Callable)
         # Evolve each variable in tandem and combine the results
         count = state.count
         # Take a step for the discrete variable - sample from p(discrete | contin, data)
-        new_disc_pos, disc_logprob, disc_logprob_grad = take_discrete_step(rng_key, state, discrete_grad_est, batch, disc_step_size)
+        new_disc_pos, disc_logprob, disc_logprob_grad, disc_opt_state = take_discrete_step(rng_key, state, opt_state.disc_state,
+                                                                                  discrete_grad_est, disc_optim, 
+                                                                                  batch, disc_step_size)
 
         state = MixedState(count, new_disc_pos, state.contin_position, 
                                     disc_logprob, state.contin_logprob, disc_logprob_grad, state.contin_logprob_grad)
 
         # Take a step for the contin variable - sample from p(contin | new_discrete, data)
-        new_contin_pos, contin_logprob, contin_logprob_grad = take_mixed_contin_step(rng_key, state, contin_grad_est, batch, contin_step_size)
+        new_contin_pos, contin_logprob, contin_logprob_grad, contin_opt_state = take_mixed_contin_step(rng_key, state, opt_state.contin_state, 
+                                                                                    contin_grad_est, contin_optim,
+                                                                                    batch, contin_step_size)
 
         new_state = MixedState(count + 1, new_disc_pos, new_contin_pos, disc_logprob, contin_logprob, 
                                                     disc_logprob_grad, contin_logprob_grad)
 
-        return new_state
+        opt_state = OptaxState(disc_opt_state, contin_opt_state)
+
+        return new_state, opt_state
 
     return one_step
 
-def get_mixed_sgld_kernel_noisy(discrete_grad_est: Callable, contin_grad_est:Callable) -> Callable:
+def get_mixed_sgld_kernel_noisy(discrete_grad_est: Callable, contin_grad_est:Callable, 
+                                disc_optim: optax.GradientTransformation, contin_optim: optax.GradientTransformation) -> Callable:
     """
     Constructs the kernel for sampling from the mixed distribution
     :param discrete_grad_est: Gradient estimator for the discrete variable
@@ -251,8 +276,8 @@ def get_mixed_sgld_kernel_noisy(discrete_grad_est: Callable, contin_grad_est:Cal
     :param contin_step_size_fn: Learning rate schedule for contin variable
     :return: The Gibbs sampler kernel
     """
-    def one_step(rng_key: PRNGKey, state: MixedState, batch: Tuple[np.ndarray, np.ndarray],
-                    disc_step_size: float, contin_step_size: float, temp: float) -> MixedState:
+    def one_step(rng_key: PRNGKey, state: MixedState, opt_state: OptaxState, batch: Tuple[np.ndarray, np.ndarray],
+                    disc_step_size: float, contin_step_size: float) -> Tuple[MixedState, OptaxState]:
         """
         Main function (kernel) that does the gibbs sampling
         :param rng_key: PRNGKey for controlled randomness
@@ -263,18 +288,23 @@ def get_mixed_sgld_kernel_noisy(discrete_grad_est: Callable, contin_grad_est:Cal
         # Evolve each variable in tandem and combine the results
         count = state.count
         # Take a step for the discrete variable - sample from p(discrete | contin, data)
-        new_disc_pos, disc_logprob, disc_logprob_grad = take_discrete_step_noisy(rng_key, state, discrete_grad_est, batch, disc_step_size)
+        new_disc_pos, disc_logprob, disc_logprob_grad, disc_opt_state = take_discrete_step_noisy(rng_key, state, opt_state.disc_state,
+                                                                                  discrete_grad_est, disc_optim, 
+                                                                                  batch, disc_step_size)
 
         state = MixedState(count, new_disc_pos, state.contin_position, 
                                     disc_logprob, state.contin_logprob, disc_logprob_grad, state.contin_logprob_grad)
 
         # Take a step for the contin variable - sample from p(contin | new_discrete, data)
-        new_contin_pos, contin_logprob, contin_logprob_grad = take_mixed_contin_step_noisy(rng_key, state, contin_grad_est, batch, contin_step_size)
+        new_contin_pos, contin_logprob, contin_logprob_grad, contin_opt_state = take_mixed_contin_step_noisy(rng_key, state, opt_state.contin_state, 
+                                                                                    contin_grad_est, contin_optim,
+                                                                                    batch, contin_step_size)
 
         new_state = MixedState(count + 1, new_disc_pos, new_contin_pos, disc_logprob, contin_logprob, 
                                                     disc_logprob_grad, contin_logprob_grad)
+        opt_state = OptaxState(disc_opt_state, contin_opt_state)
 
-        return new_state
+        return new_state, opt_state
 
     return one_step
 
@@ -296,41 +326,101 @@ def make_init_mixed_state(key, model, disc_grad_est_fn, contin_grad_est_fn, data
 
     return state
 
-def adjust_learning_rate(lr_0, epoch, total, num_cycles, num_batch, batch_idx):
-    rcounter = epoch*num_batch+batch_idx
+def make_cyclical_lr_fn(lr_0, total, num_cycles):
     k = total // num_cycles
-    rk = (rcounter % k) / k
-    cos_inner = np.pi * rk
-    cos_out = np.cos(cos_inner) + 1
-    lr = 0.5*cos_out*lr_0
+    def schedule_fn(step):
+        rk = (step % k) / k
+        cos_inner = jnp.pi * rk
+        cos_out = jnp.cos(cos_inner) + 1
+        lr = 0.5*cos_out*lr_0
 
-    return lr, rk
+        return lr
 
-def inference_loop_multiple_chains(rng_key, kernel, kernel_noisy, init_state, disc_lr, contin_lr,
+    return schedule_fn
+
+def inference_loop_multiple_chains(rng_key, model, disc_lr, contin_lr,
+                                   J, temp, sigma, eta, mu,
                                    data_loader, batch_size, num_samples,
-                                   num_cycles, temp, beta=0.5):
+                                   num_cycles, beta=0.5, classifier=True):
 
-    _, key_samples = jax.random.split(rng_key, 2)
+    key_init, key_samples = jax.random.split(rng_key, 2)
 
     num_batch = len(data_loader)
-    print(f"Num batches: {num_batch}")
     total = num_samples*num_batch
+    data_size = len(data_loader.dataset)
+
+    # Setup prior and likelihood functions
+
+    if classifier:
+        log_likelihood_fn = make_clf_log_likelihood(temp, data_size)
+    else:
+        log_likelihood_fn = make_gaussian_likelihood(sigma, temp, data_size)
+
+    disc_logprior_fn = generate_disc_logprior_fn(J, mu, eta, temp)
+    contin_logprior_fn = generate_contin_logprior_fn(sigma, temp)
+    disc_grad_est_fn = generate_discrete_grad_estimator(model, disc_logprior_fn, log_likelihood_fn)
+    contin_grad_est_fn = generate_mixed_contin_grad_estimator(model, contin_logprior_fn, log_likelihood_fn)
+
+    init_state = make_init_mixed_state(key_init, model, disc_grad_est_fn, contin_grad_est_fn, 
+                                                data_loader, batch_size)
+
+    # Setup optimizer and scheduling functions
+    cycle_len = total // num_cycles
+
+    disc_schedule_fn = make_cyclical_lr_fn(disc_lr, total, num_cycles)
+    contin_schedule_fn = make_cyclical_lr_fn(contin_lr, total, num_cycles)
+
+    disc_optim = optax.chain(
+                    optax.clip_by_global_norm(5.0),
+                    optax.scale_by_adam(),
+                    optax.scale_by_schedule(disc_schedule_fn))
+
+    contin_optim = optax.chain(
+                    optax.clip_by_global_norm(5.0),
+                    optax.scale_by_adam(),
+                    optax.scale_by_schedule(contin_schedule_fn))
+
+    disc_opt_state, contin_opt_state = disc_optim.init(init_state.discrete_position),  \
+                                       contin_optim.init(init_state.contin_position)
+
+    
+    opt_state = OptaxState(disc_opt_state, contin_opt_state)
+    state = init_state
+    # Setup kernels
+
+    kernel = jax.jit(get_mixed_sgld_kernel(disc_grad_est_fn, contin_grad_est_fn, 
+                                            disc_optim, contin_optim))
+
+    kernel_noisy = jax.jit(get_mixed_sgld_kernel_noisy(disc_grad_est_fn, contin_grad_est_fn,
+                                                disc_optim, contin_optim))
+
+
+            
 
     keys = jax.random.split(rng_key, num_samples)
     states = []
     exp_states = []
-
-    state = init_state
+    step = 0
     for epoch, key in enumerate(keys):
         for batch_idx, batch in enumerate(data_loader):
-            cur_disc_lr, _ = adjust_learning_rate(disc_lr, epoch, total, num_cycles, num_batch, batch_idx)
-            cur_contin_lr, rk = adjust_learning_rate(contin_lr, epoch, total, num_cycles, num_batch, batch_idx)
+            rk = (step % cycle_len) / cycle_len
+            cur_disc_lr = disc_schedule_fn(step)
+            cur_contin_lr  = contin_schedule_fn(step)
 
             if rk < beta:
-                state = kernel_noisy(key, state, batch, cur_disc_lr, cur_contin_lr)
+                if num_batch == 1:
+                    state, opt_state = kernel_noisy(key, state, opt_state, batch, 
+                                                        cur_disc_lr, cur_contin_lr)
+                else:
+                    state, opt_state = kernel(key, state, opt_state, batch, 
+                                                cur_disc_lr, cur_contin_lr)
+                    
                 exp_states.append(state)
             else:
-                state = kernel_noisy(key, state, batch, cur_disc_lr, cur_contin_lr, temp)
+                state, opt_state = kernel_noisy(key, state, opt_state, batch, 
+                                            cur_disc_lr, cur_contin_lr)
                 states.append(state)
+            
+            step += 1
 
     return states, exp_states

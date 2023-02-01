@@ -76,36 +76,14 @@ class MixedSGMCMC(ClassifierMixin):
         assert J.shape[0] == J.shape[1]
         p = J.shape[0]
 
-        if self._classifier:
-            log_likelihood_fn = make_clf_log_likelihood(self.temp, data_size)
-        else:
-            log_likelihood_fn = make_gaussian_likelihood(self.sigma, self.temp, data_size)
-
 
         mixed_net_fn = models.make_mixed_net_fn(layer_dims=self.layer_dims, activation_fns=activation_fns ,output_dim=self.output_dim)
         self.model_ = hk.without_apply_rng(hk.transform(mixed_net_fn))
 
-        disc_logprior_fn = generate_disc_logprior_fn(J, self.mu, self.eta, self.temp)
-        contin_logprior_fn = generate_contin_logprior_fn(self.sigma, self.temp)
-        disc_grad_est_fn = generate_discrete_grad_estimator(self.model_, disc_logprior_fn, log_likelihood_fn)
-        contin_grad_est_fn = generate_mixed_contin_grad_estimator(self.model_, contin_logprior_fn, log_likelihood_fn)
-
-
-        key_samples, key_init = jax.random.split(self.rng_key_, 2)
-        # sgd_optim = optax.inject_hyperparams(optax.sgd)(learning_rate=self.contin_lr)
-
-        init_state = make_init_mixed_state(key_init, self.model_, disc_grad_est_fn, contin_grad_est_fn, 
-                                                data_loader, self.batch_size)
-
-        kernel = jax.jit(get_mixed_sgld_kernel(disc_grad_est_fn, contin_grad_est_fn))
-
-        kernel_noisy = jax.jit(get_mixed_sgld_kernel_noisy(disc_grad_est_fn, contin_grad_est_fn))
-
-        samples, exp_samples = inference_loop_multiple_chains(key_samples, kernel, kernel_noisy, init_state, 
-                                                                    self.disc_lr, self.contin_lr,
-                                                                    data_loader, self.batch_size,
-                                                                    self.n_samples, self.num_cycles, self.temp,
-                                                                    beta=self.beta)
+        samples, exp_samples = inference_loop_multiple_chains(self.rng_key_, self.model_, self.disc_lr, self.contin_lr, 
+                                                            J, self.temp, self.sigma, self.eta, self.mu, 
+                                                            data_loader, self.batch_size, self.n_samples, 
+                                                            self.num_cycles, self.beta, self._classifier)
 
         # if self.n_warmup > 0:
         #     disc_pos = tree_utils.tree_stack(np.array(disc_states)[:,self.n_warmup:])

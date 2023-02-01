@@ -1,0 +1,2 @@
+- Run simulation studies with drop-out feature selection
+- Refine the BNN + BG performace on CCLE dataset

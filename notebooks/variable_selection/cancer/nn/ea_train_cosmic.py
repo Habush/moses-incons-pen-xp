@@ -112,7 +112,7 @@ def tree_similarity(ind1, ind2):
 
 
 def run_deap(rng_key, X_train, X_val, X_test, y_train, y_val,
-              y_test, cxpb, mutbp, num_gen, logger=None):
+              y_test, cxpb, mutbp, num_gen, logger=None, classifier=True):
 
     p = X_train.shape[1]
 

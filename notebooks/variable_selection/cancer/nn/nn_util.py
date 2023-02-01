@@ -6,8 +6,7 @@ import sys
 import pandas as pd
 from sklearn.model_selection import train_test_split, StratifiedKFold
 import optax
-from typing import NamedTuple
-from blackjax.types import PRNGKey
+from typing import NamedTuple, Any
 import logging
 from logging import handlers
 import tensorflow_probability.substrates.jax as tfp
@@ -15,15 +14,12 @@ import scipy.stats as stats
 import haiku as hk
 from torch.utils import data
 
+PRNGKey = Any
+
 class Batch(NamedTuple):
     x: jnp.ndarray
     y: jnp.ndarray
 
-
-class TrainingState(NamedTuple):
-    params: hk.Params
-    avg_params: hk.Params
-    opt_state: optax.OptState
 
 def generate_synthetic_data(*, key, num_tf, num_genes,
                             tf_on, num_samples, binary, val_tf=4):
@@ -670,3 +666,16 @@ class NumpyLoader(data.DataLoader):
         drop_last=drop_last,
         timeout=timeout,
         worker_init_fn=worker_init_fn)
+
+def fpkm_to_expr(data_path, gene_id_data, idx_col="model_id"):
+    rna_seq_data = pd.read_csv(data_path)
+    #Calculate log2 transformed values of TPM (Transcripts per Million) form fpkm
+    tpm_data = rna_seq_data.groupby([idx_col])["fpkm"].transform(lambda x : np.log2(((x  / x.sum()) * 1e6) + 1)) # add pseudp-count of 1 to avoid taking log2(0)
+    rna_seq_data["log2.tpm"] = tpm_data
+    rna_seq_data["idx"] = rna_seq_data.groupby(idx_col).cumcount()
+    exp_data = rna_seq_data.pivot(index=idx_col ,columns="idx", values="log2.tpm")
+    gene_sym_data = pd.read_csv(gene_id_data, index_col="gene_id")
+    gene_ids = rna_seq_data["gene_id"].unique()
+    gene_syms = gene_sym_data.loc[gene_ids]["hgnc_symbol"]
+    exp_data.columns = gene_syms
+    return exp_data
