@@ -13,6 +13,8 @@ import tensorflow_probability.substrates.jax as tfp
 import scipy.stats as stats
 import haiku as hk
 from torch.utils import data
+import tree_utils
+from tqdm import tqdm
 
 PRNGKey = Any
 
@@ -20,147 +22,6 @@ class Batch(NamedTuple):
     x: jnp.ndarray
     y: jnp.ndarray
 
-
-def generate_synthetic_data(*, key, num_tf, num_genes,
-                            tf_on, num_samples, binary, val_tf=4):
-
-    p = num_tf + (num_tf * num_genes)
-
-    keys = jax.random.split(key, num_tf)
-
-    def generate_tfs(key):
-        tf = jax.random.normal(key=key, shape=(num_samples, ))
-        return tf
-
-    def generate_genes(key, tf):
-        key_rmh = jax.random.split(key, num_genes)
-
-        def generate_single_gene(i, key):
-            gene = tf + 0.51*jax.random.normal(key=key, shape=(num_samples,))
-            return i+1, gene
-
-        _, genes = jax.lax.scan(generate_single_gene, 0, key_rmh)
-
-        return genes
-
-    tfs = jax.vmap(generate_tfs)(keys)
-    genes = jax.vmap(generate_genes)(keys, tfs)
-
-    key_tf, key_genes = jax.random.split(key, 2)
-
-    idx_on = jax.random.choice(key_tf, jnp.arange(num_tf), shape=(tf_on, ), replace=False)
-
-    betas = jnp.zeros(p)
-
-    X = jnp.zeros((num_samples, p))
-
-
-    val_tf = val_tf
-    val_gene = val_tf/np.sqrt(10)
-
-    k = num_genes + 1
-
-    for i in range(p):
-        X = X.at[:,i].set(tfs[i])
-        for j in range(i+1, i+k):
-            X = X.at[:,j].set(genes[i, j])
-
-    # num_pos_reg = int(num_genes*perc_pos)
-    # if perc_pos < 1:
-    #     pos_reg_idx = jax.random.choice(key_genes, jnp.arange(num_genes), shape=(num_pos_reg, ))
-    # else:
-
-
-    for i in range(tf_on):
-        idx = idx_on[i]*k
-        betas = betas.at[idx].set(val_tf)
-        for j in range(idx+1, idx+k):
-            # if j in pos_reg_idx: # positively regulated gene
-            #     betas = betas.at[j].set(val_gene)
-            #
-            # else: # negatively regulated gene
-            #     betas = betas.at[j].set(-val_gene)
-            betas = betas.at[j].set(val_gene)
-
-
-
-    y = jnp.dot(X, betas)
-
-    if binary: # return classification data
-        p = jax.nn.sigmoid(y)
-        y = (jax.vmap(jax.random.bernoulli, in_axes=(None, 0))(key, p))*1.
-    else:
-        sigma = num_genes / num_tf
-        err = sigma*jax.random.normal(key, shape=(num_samples,))
-        y = y + err
-
-    return X, y, betas, idx_on
-
-def get_assoc_mat(*, num_tf, num_genes, corr=1.):
-    feats = num_tf + (num_tf * num_genes)
-    assoc_mat = np.eye(feats, feats)
-    m = num_genes + 1
-    for t in range(0, m * num_tf, m):
-        for g in range(t + 1, t + m):
-            assoc_mat[t, g] = corr
-            assoc_mat[g, t] = corr
-    return assoc_mat
-
-def assign_cols(X, append_y=True):
-    X_copy = X.copy()
-    cols = []
-    if append_y:
-        for i in range(X_copy.shape[1] - 1):
-            cols.append(f"f{i + 1}")
-
-        cols.append("y")
-    else:
-        for i in range(X_copy.shape[1]):
-            cols.append(f"f{i + 1}")
-    X_copy.columns = cols
-
-    return X_copy
-
-def load_bmm_files(parent_dir):
-    net_dir = os.path.join(parent_dir, "net")
-    feat_dir = os.path.join(parent_dir, "feats")
-    data_dir = os.path.join(parent_dir, "data")
-
-    net_dfs = []
-    data_dfs = []
-    feat_ls = []
-
-    with open(os.path.join(parent_dir, "rand_seeds.txt"), "r") as fp:
-        seed_str = fp.readline().strip()
-
-    seeds = [int(s) for s in seed_str.split(',')]
-
-    for s in seeds:
-        data_df = pd.read_csv(os.path.join(data_dir, f"data_bm_{s}.csv"), header=None)
-        net_df = pd.read_csv(os.path.join(net_dir, f"feat_net_{s}.csv"), header=None)
-        with open(os.path.join(feat_dir, f"feats_{s}.txt"), "r") as fp:
-            feats_str = fp.readline().strip()
-
-        feats = [int(f) for f in feats_str.split(',')]
-
-        data_df = assign_cols(data_df)
-
-        data_dfs.append(data_df)
-        net_dfs.append(net_df)
-        feat_ls.append(feats)
-
-
-    return seeds, data_dfs, net_dfs, feat_ls
-
-def prepare_data(seeds, seed_idx, data, nets, out_val_size=0.3, test_size=0.3):
-    seed = seeds[seed_idx]
-    X, y = data[seed_idx].iloc[:,:-1].to_numpy().astype(np.float), data[seed_idx].iloc[:,-1].to_numpy().astype(np.float)
-    # print(np.unique(y, return_counts=True))
-    X_train, X_test, y_train, y_test = train_test_split(X, y, random_state=seed, shuffle=True, stratify=y, test_size=test_size)
-    X_train, X_out_val, y_train, y_out_val = train_test_split(X_train, y_train, random_state=seed,
-                                                              shuffle=True, stratify=y_train, test_size=out_val_size)
-    net = nets[seed_idx].to_numpy()
-    return seed, net, (X_train, X_out_val, X_test, y_train, y_out_val, y_test)
 
 def recall(y_true, y_pred):
     true_positives = jnp.sum(jnp.round(jnp.clip(y_true * y_pred, 0, 1)))
@@ -490,7 +351,7 @@ def get_model_pred(model, params, x):
 def cross_entropy_loss(model, x, y, params, gamma):
     logits = model.apply(params, x, gamma).ravel()
     loss = optax.sigmoid_binary_cross_entropy(logits, y)
-    return log_ll
+    return loss
 
 def mse_loss(model, x, y, params, gamma):
     preds = model.apply(params, x, gamma).ravel()
@@ -625,57 +486,82 @@ def setup_logger(log_path, seed):
     log = logging.getLogger()
     return log
 
+def integrated_gradients(model, params, gammas, x, N):
 
-def numpy_collate(batch):
-  if isinstance(batch[0], np.ndarray):
-    return np.stack(batch)
-  elif isinstance(batch[0], (tuple,list)):
-    transposed = zip(*batch)
-    return [numpy_collate(samples) for samples in transposed]
-  else:
-    return np.array(batch)
+    p = x.shape[-1]
+    baseline = jnp.zeros((1, p))
+    t = jnp.linspace(0, 1, N).reshape(-1, 1)
+    path = baseline * (1 - t) + x * t
 
-class NumpyData(data.Dataset):
+    def get_grad(pi):
+        # compute gradient
+        # add/remove batch axes
+        return jnp.mean(jax.vmap(jax.grad(lambda param, gamma, p: model.apply(param, gamma, p, True).squeeze(), argnums=2),
+                                 in_axes=(0, 0, None))(params, gammas, pi), axis=0)
 
-    def __init__(self, X, y):
-        self.data = X
-        self.target = y
-        self.size = X.shape[0]
+    gs = jax.vmap(get_grad)(path)
+    # sum pieces (Riemann sum), multiply by (x - x')
+    ig = jnp.mean(gs, axis=0) * (x.reshape(1, -1) - baseline)
+    return ig
 
-    def __len__(self):
-        return self.size
+def evaluate_bnn_bg_models(model, X, y, params, gammas, loss_fn):
+    eval_fn = lambda p, g: model.apply(p, g, X, True).ravel()
+    # print(gammas.shape)
+    # print(params["linear"]["w"].shape)
+    preds = eval_fn(params, gammas)
+    # print(preds.shape)
+    # preds = preds.reshape(-1, preds.shape[-1])
+    # losses = jax.vmap(lambda x, z: jnp.sqrt(jnp.mean((x - z)**2)), in_axes=(0, None))(preds, y)
+    # mean_loss = jnp.sqrt(jnp.mean(losses, axis=-1))
+    # return jnp.mean(losses)
+    return loss_fn(y, preds)
 
-    def __getitem__(self, idx):
-        x, y = self.data[idx], self.target[idx]
-        return x, y
+def get_feats_dropout_loss(model, params, gammas, X, y, classifier=False):
+    var_loss_dict = {"feats_idx": [], "num_models": [] , "loss_on": [], "loss_off": [], "loss_diff": []}
 
-class NumpyLoader(data.DataLoader):
-  def __init__(self, dataset, batch_size=1,
-                shuffle=False, sampler=None,
-                batch_sampler=None, num_workers=0,
-                pin_memory=False, drop_last=False,
-                timeout=0, worker_init_fn=None):
-    super(self.__class__, self).__init__(dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        sampler=sampler,
-        batch_sampler=batch_sampler,
-        num_workers=num_workers,
-        collate_fn=numpy_collate,
-        pin_memory=pin_memory,
-        drop_last=drop_last,
-        timeout=timeout,
-        worker_init_fn=worker_init_fn)
+    p = X.shape[1]
 
-def fpkm_to_expr(data_path, gene_id_data, idx_col="model_id"):
-    rna_seq_data = pd.read_csv(data_path)
-    #Calculate log2 transformed values of TPM (Transcripts per Million) form fpkm
-    tpm_data = rna_seq_data.groupby([idx_col])["fpkm"].transform(lambda x : np.log2(((x  / x.sum()) * 1e6) + 1)) # add pseudp-count of 1 to avoid taking log2(0)
-    rna_seq_data["log2.tpm"] = tpm_data
-    rna_seq_data["idx"] = rna_seq_data.groupby(idx_col).cumcount()
-    exp_data = rna_seq_data.pivot(index=idx_col ,columns="idx", values="log2.tpm")
-    gene_sym_data = pd.read_csv(gene_id_data, index_col="gene_id")
-    gene_ids = rna_seq_data["gene_id"].unique()
-    gene_syms = gene_sym_data.loc[gene_ids]["hgnc_symbol"]
-    exp_data.columns = gene_syms
-    return exp_data
+    if classifier:
+        loss_fn = lambda y, logits: optax.sigmoid_binary_cross_entropy(logits, y)
+
+    else:
+        loss_fn = lambda y, preds: jnp.sqrt(jnp.mean((y - preds)**2))
+
+    for idx in tqdm(range(p)):
+        idx_on = np.argwhere(gammas[:,idx] == 1.).ravel()
+        loss_on, loss_off = 0., 0.
+        if idx_on.size == 0: ## irrelevant feature
+            loss_diff = 1e9
+        else:
+            disc_states_on = gammas[idx_on]
+            # print(disc_states_on.shape)
+            params_on = jax.tree_util.tree_map(lambda x: x[idx_on], params)
+            loss_on = jnp.sum(jax.vmap(lambda p, g: evaluate_bnn_bg_models(model, X, y, p, g, loss_fn))(params_on, disc_states_on))
+            # Turn-off the variable, and see how the loss changes
+            disc_states_off = disc_states_on.at[:,idx].set(0)
+            loss_off = jnp.sum(jax.vmap(lambda p, g: evaluate_bnn_bg_models(model, X, y, p, g, loss_fn))(params_on, disc_states_off))
+
+            # loss_diff = (loss_on - loss_off) * (len(idx_on) / num_models)
+            loss_diff = (loss_on - loss_off)
+
+
+        var_loss_dict["feats_idx"].append(idx)
+        var_loss_dict["num_models"].append(idx_on.size)
+        var_loss_dict["loss_on"].append(loss_on)
+        var_loss_dict["loss_off"].append(loss_off)
+        var_loss_dict["loss_diff"].append(loss_diff)
+
+
+    var_loss_df = pd.DataFrame(var_loss_dict).sort_values(by="loss_diff")
+
+    return var_loss_df
+
+
+def find_feats_on_graph(feat_idx, J):
+    G = np.zeros((len(feat_idx), len(feat_idx)))
+    for i, f1 in enumerate(feat_idx):
+        for j, f2 in enumerate(feat_idx):
+            if f1 != f2:
+                G[i, j] = J[f1, f2]
+
+    return G

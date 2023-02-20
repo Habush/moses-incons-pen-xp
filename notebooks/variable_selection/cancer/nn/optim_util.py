@@ -46,7 +46,7 @@ def sgd_gradient_update(step_size_fn,
             momentum=jax.tree_map(jnp.zeros_like, params),
             preconditioner_state=preconditioner.init(params))
 
-    def update_fn(key, gradient, state):
+    def update_fn(gradient, state):
         lr = step_size_fn(state.count)
         lr_sqrt = jnp.sqrt(lr)
 
@@ -97,7 +97,7 @@ def sgld_gradient_update(step_size_fn,
             momentum=jax.tree_map(jnp.zeros_like, params),
             preconditioner_state=preconditioner.init(params))
 
-    def update_fn(key, gradient, state):
+    def update_fn(gradient, state, key):
         lr = step_size_fn(state.count)
         lr_sqrt = jnp.sqrt(lr)
         noise_std = jnp.sqrt(2 * (1 - momentum_decay))
@@ -118,6 +118,116 @@ def sgld_gradient_update(step_size_fn,
         updates = preconditioner.multiply_by_m_inv(momentum, preconditioner_state)
         updates = jax.tree_map(lambda m: m * lr_sqrt, updates)
         return updates, OptaxSGLDState(
+            count=state.count + 1,
+            momentum=momentum,
+            preconditioner_state=preconditioner_state)
+
+    return GradientTransformation(init_fn, update_fn)
+
+
+def disc_sgd_gradient_update(step_size_fn,
+                             momentum_decay=0.,
+                             preconditioner=None):
+    """Optax implementation of the SGD optimizer.
+    """
+
+    if preconditioner is None:
+        preconditioner = get_identity_preconditioner()
+
+    def init_fn(gamma):
+        return OptaxSGLDState(
+            count=jnp.zeros([], jnp.int32),
+            momentum=jax.tree_map(jnp.zeros_like, gamma),
+            preconditioner_state=preconditioner.init(gamma))
+
+    def update_fn(key, gamma, gradient, state):
+        lr = step_size_fn(state.count)
+        lr_sqrt = jnp.sqrt(lr)
+
+        preconditioner_state = preconditioner.update_preconditioner(
+            gradient, state.preconditioner_state)
+
+        def update_momentum(m, g):
+            return momentum_decay * m + g * lr_sqrt
+
+        def proposal(theta, g, step_size):
+            diff = (0.5*g*-(2*theta - 1)) - (1./(2*step_size))
+            prob = jax.nn.sigmoid(diff)
+            prob_inv = 1 - prob
+            prob = prob[...,None]
+            prob_inv = prob_inv[...,None]
+            delta = jnp.argmax(jnp.concatenate([prob, prob_inv], axis=1), axis=-1)
+
+            theta_delta = (1 - theta)*delta + theta*(1 - delta)
+            return theta_delta*1.
+
+        momentum = jax.tree_map(update_momentum, state.momentum, gradient)
+        updates = preconditioner.multiply_by_m_inv(momentum, preconditioner_state)
+        updates = jax.tree_map(lambda m: m * lr_sqrt, updates)
+        gamma = proposal(gamma, updates, lr)
+
+        return gamma, OptaxSGLDState(
+            count=state.count + 1,
+            momentum=momentum,
+            preconditioner_state=preconditioner_state)
+
+    return GradientTransformation(init_fn, update_fn)
+
+
+def disc_sgld_gradient_update(step_size_fn,
+                              momentum_decay=0.,
+                              preconditioner=None):
+    """Optax implementation of the SGLD optimizer.
+
+    If momentum_decay is set to zero, we get the SGLD method [1]. Otherwise,
+    we get the underdamped SGLD (SGHMC) method [2].
+
+    Args:
+      step_size_fn: a function taking training step as input and prodng the
+        step size as output.
+      seed: int, random seed.
+      momentum_decay: float, momentum decay parameter (default: 0).
+      preconditioner: Preconditioner, an object representing the preconditioner
+        or None; if None, identity preconditioner is used (default: None).  [1]
+          "Bayesian Learning via Stochastic Gradient Langevin Dynamics" Max
+          Welling, Yee Whye Teh; ICML 2011  [2] "Stochastic Gradient Hamiltonian
+          Monte Carlo" Tianqi Chen, Emily B. Fox, Carlos Guestrin; ICML 2014
+    """
+
+    if preconditioner is None:
+        preconditioner = get_identity_preconditioner()
+
+    def init_fn(gamma):
+        return OptaxSGLDState(
+            count=jnp.zeros([], jnp.int32),
+            momentum=jax.tree_map(jnp.zeros_like, gamma),
+            preconditioner_state=preconditioner.init(gamma))
+
+    def update_fn(key, gamma, gradient, state):
+        lr = step_size_fn(state.count)
+        lr_sqrt = jnp.sqrt(lr)
+
+        preconditioner_state = preconditioner.update_preconditioner(
+            gradient, state.preconditioner_state)
+
+        def update_momentum(m, g):
+            return momentum_decay * m + g * lr_sqrt
+
+        def proposal(key, theta, g, step_size):
+            diff = (-0.5*g*(2*theta - 1)) - (1./(2*step_size))
+            delta = jax.random.bernoulli(key, jax.nn.sigmoid(diff))
+            theta_delta = (1 - theta)*delta + theta*(1 - delta)
+            return theta_delta*1.
+
+
+
+        momentum = jax.tree_map(update_momentum, state.momentum, gradient)
+        updates = preconditioner.multiply_by_m_inv(momentum, preconditioner_state)
+        updates = jax.tree_map(lambda m: m * lr_sqrt, updates)
+        gamma = proposal(key, gamma, updates, lr)
+
+
+        return gamma, OptaxSGLDState(
             count=state.count + 1,
             momentum=momentum,
             preconditioner_state=preconditioner_state)
@@ -212,112 +322,3 @@ def make_cyclical_lr_fn(lr_0, total, num_cycles):
         return lr
 
     return schedule_fn
-
-def disc_sgd_gradient_update(step_size_fn,
-                             momentum_decay=0.,
-                             preconditioner=None):
-    """Optax implementation of the SGD optimizer.
-    """
-
-    if preconditioner is None:
-        preconditioner = get_identity_preconditioner()
-
-    def init_fn(gamma):
-        return OptaxSGLDState(
-            count=jnp.zeros([], jnp.int32),
-            momentum=jax.tree_map(jnp.zeros_like, gamma),
-            preconditioner_state=preconditioner.init(gamma))
-
-    def update_fn(key, gamma, gradient, state):
-        lr = step_size_fn(state.count)
-        lr_sqrt = jnp.sqrt(lr)
-
-        preconditioner_state = preconditioner.update_preconditioner(
-            gradient, state.preconditioner_state)
-
-        def update_momentum(m, g):
-            return momentum_decay * m + g * lr_sqrt
-
-        def proposal(theta, g, step_size):
-            diff = (0.5*g*-(2*theta - 1)) - (1./(2*step_size))
-            prob = jax.nn.sigmoid(diff)
-            prob_inv = 1 - prob
-            prob = prob[...,None]
-            prob_inv = prob_inv[...,None]
-            delta = jnp.argmax(jnp.concatenate([prob, prob_inv], axis=1), axis=-1)
-
-            theta_delta = (1 - theta)*delta + theta*(1 - delta)
-            return theta_delta*1.
-
-        momentum = jax.tree_map(update_momentum, state.momentum, gradient)
-        # updates = preconditioner.multiply_by_m_inv(momentum, preconditioner_state)
-        # updates = jax.tree_map(lambda m: m * lr_sqrt, updates)
-        gamma = proposal(gamma, gradient, lr)
-
-        return gamma, OptaxSGLDState(
-            count=state.count + 1,
-            momentum=momentum,
-            preconditioner_state=preconditioner_state)
-
-    return GradientTransformation(init_fn, update_fn)
-
-
-def disc_sgld_gradient_update(step_size_fn,
-                              momentum_decay=0.,
-                              preconditioner=None):
-    """Optax implementation of the SGLD optimizer.
-
-    If momentum_decay is set to zero, we get the SGLD method [1]. Otherwise,
-    we get the underdamped SGLD (SGHMC) method [2].
-
-    Args:
-      step_size_fn: a function taking training step as input and prodng the
-        step size as output.
-      seed: int, random seed.
-      momentum_decay: float, momentum decay parameter (default: 0).
-      preconditioner: Preconditioner, an object representing the preconditioner
-        or None; if None, identity preconditioner is used (default: None).  [1]
-          "Bayesian Learning via Stochastic Gradient Langevin Dynamics" Max
-          Welling, Yee Whye Teh; ICML 2011  [2] "Stochastic Gradient Hamiltonian
-          Monte Carlo" Tianqi Chen, Emily B. Fox, Carlos Guestrin; ICML 2014
-    """
-
-    if preconditioner is None:
-        preconditioner = get_identity_preconditioner()
-
-    def init_fn(gamma):
-        return OptaxSGLDState(
-            count=jnp.zeros([], jnp.int32),
-            momentum=jax.tree_map(jnp.zeros_like, gamma),
-            preconditioner_state=preconditioner.init(gamma))
-
-    def update_fn(key, gamma, gradient, state):
-        lr = step_size_fn(state.count)
-        lr_sqrt = jnp.sqrt(lr)
-
-        preconditioner_state = preconditioner.update_preconditioner(
-            gradient, state.preconditioner_state)
-
-        def update_momentum(m, g):
-            return momentum_decay * m + g * lr_sqrt
-
-        def proposal(key, theta, g, step_size):
-            diff = (-0.5*g*(2*theta - 1)) - (1./(2*step_size))
-            delta = jax.random.bernoulli(key, jax.nn.sigmoid(diff))
-            theta_delta = (1 - theta)*delta + theta*(1 - delta)
-            return theta_delta*1.
-
-
-
-        momentum = jax.tree_map(update_momentum, state.momentum, gradient)
-        # updates = preconditioner.multiply_by_m_inv(momentum, preconditioner_state)
-        # updates = jax.tree_map(lambda m: m * lr_sqrt, updates)
-        gamma = proposal(key, gamma, gradient, lr)
-
-
-        return gamma, OptaxSGLDState(
-            count=state.count + 1,
-            momentum=momentum,
-            preconditioner_state=preconditioner_state)
-
-    return GradientTransformation(init_fn, update_fn)
